@@ -10,13 +10,18 @@ checkpoint_dir: checkpoints
 codebook_size: 2048
 compile_model: false
 device: cuda
+eos_loss_weight: 1.0
 epochs: 50
 grad_accum_steps: 4
 grad_clip: 1.0
-hf_dataset: shangeth/librispeech-mimi-codes
+hf_datasets:
+- shangeth/librispeech-mimi-codes
 hf_splits:
-- train_clean_100
-- train_clean_360
+- train_clean_100,train_clean_360
+hf_val_datasets: []
+hf_val_splits: []
+hf_weights:
+- 1.0
 k_codebooks: 3
 keep_last_n: 3
 llm_name: HuggingFaceTB/SmolLM2-360M
@@ -28,7 +33,6 @@ lora_r: 16
 lora_target_modules:
 - q_proj
 - v_proj
-lowercase_text: true
 lr: 0.0001
 lr_decay_steps: 20000
 lr_warmup_steps: 500

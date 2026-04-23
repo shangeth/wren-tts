@@ -20,12 +20,23 @@ class Config:
     codebook_size:         int   = 2048       # Mimi codebook vocab size (fixed)
 
     # --- Data (HuggingFace datasets only) ---
-    # dataset.py loads hf_dataset with hf_splits, concatenates, and partitions train/val.
-    # For custom mixes (e.g. ljspeech + librispeech), edit dataset.py directly.
-    hf_dataset:            str       = "shangeth/librispeech-mimi-codes"
-    hf_splits:             List[str] = field(default_factory=lambda: ["train_clean_100", "train_clean_360"])
-    lowercase_text:        bool      = True   # LibriSpeech is pre-lowercased; toggle for mixed-case corpora
-    multispeaker:          bool      = True   # prepend a reference-audio block at training time
+    # Parallel lists — index i defines one dataset source:
+    #   hf_datasets[i] : HF repo id
+    #   hf_splits[i]   : comma-sep split names from that repo (e.g. "train_clean_100,train_clean_360")
+    #   hf_weights[i]  : fraction of that dataset to use, in (0, 1]. 1.0 = full, 0.2 = 20%.
+    #                    Useful for replay buffers when adding new data (avoid catastrophic forgetting).
+    hf_datasets:           List[str]   = field(default_factory=lambda: ["shangeth/librispeech-mimi-codes"])
+    hf_splits:             List[str]   = field(default_factory=lambda: ["train_clean_100,train_clean_360"])
+    hf_weights:            List[float] = field(default_factory=lambda: [1.0])
+    # Optional explicit val sources. If non-empty, used as-is for validation.
+    # If empty, falls back to val_fraction tail of the combined training data.
+    hf_val_datasets:       List[str]   = field(default_factory=list)
+    hf_val_splits:         List[str]   = field(default_factory=list)
+    multispeaker:          bool        = True   # prepend a reference-audio block at training time
+
+    # EOS class reweighting — compensates for the 1:~200 class imbalance of AUDIO_EOS
+    # vs normal codes in cb0's training targets. Raise if model hallucinates past prompts.
+    eos_loss_weight:       float       = 1.0    # set to 50–100 to fix EOS underlearning
     val_fraction:          float     = 0.01
     max_text_tokens:       int       = 200
     max_audio_frames:      int       = 300    # 10 s at 12.5 fps
@@ -64,6 +75,16 @@ class Config:
     log_audio_every:       int   = 200
     wandb_project:         str   = "tts"
     wandb_run_name:        Optional[str] = None
+
+    def __post_init__(self):
+        # YAML parses bare scientific notation (e.g. 1e-4) as a string, not a float.
+        # Coerce every annotated-float field so YAML quirks never silently break training.
+        import typing
+        for name, hint in typing.get_type_hints(self.__class__).items():
+            if hint is float:
+                val = getattr(self, name)
+                if not isinstance(val, float):
+                    object.__setattr__(self, name, float(val))
 
     def save(self, path: str):
         with open(path, "w") as f:

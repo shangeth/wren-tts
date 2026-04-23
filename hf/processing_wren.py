@@ -1,8 +1,10 @@
 """
 Wren processor: text tokenization + audio saving.
 
-Text is lowercased to match training distribution. The `<|audio_sep|>` separator is
-always appended so `model.generate(**processor(text))` "just works".
+Text casing is preserved as-is. Pass text naturally ("Hello, World!") — the model
+is trained on mixed-case data (LJSpeech mixed-case, LibriSpeech lowercase).
+The `<|audio_sep|>` separator is always appended so `model.generate(**processor(text))`
+"just works".
 """
 
 from typing import List, Union
@@ -27,9 +29,6 @@ class WrenProcessor(ProcessorMixin):
         return_tensors: str = "pt",
         **kwargs,
     ):
-        # Training data was lowercased; match that distribution.
-        text = text.lower() if isinstance(text, str) else [t.lower() for t in text]
-
         enc = self.tokenizer(
             text,
             add_special_tokens = False,

@@ -45,10 +45,10 @@ text ──► SmolLM2-360M ──► k audio-code heads ──► Mimi decoder 
 ## Training data
 
 - [LibriSpeech](https://www.openslr.org/12) `train-clean-100` + `train-clean-360` — ~460 h, multi-speaker, English audiobooks
-- Trained for 5 epochs with effective batch size 32
+- [LJSpeech](https://keithito.com/LJ-Speech-Dataset/) — ~24 h, single speaker, mixed-case transcripts preserved
 
-Text is lowercased before tokenization. This v1 checkpoint was trained on LibriSpeech
-only; LJSpeech was not included in this run.
+Text casing is preserved as-is: LibriSpeech is stored lowercase, LJSpeech is mixed-case.
+Pass text naturally to the processor — do not pre-lowercase.
 
 ## Usage
 

@@ -1,0 +1,26 @@
+# Wren-TTS-360M v1
+# LibriSpeech train-clean-{100,360} + full LJSpeech, trained from scratch with EOS fix.
+# Casing preserved as-is: LibriSpeech is stored lowercase, LJSpeech is mixed-case.
+
+hf_datasets:     ["shangeth/librispeech-mimi-codes", "shangeth/ljspeech-mimi-codes"]
+hf_splits:       ["train_clean_100,train_clean_360", "train"]
+hf_weights:      [1.0, 1.0]
+
+hf_val_datasets: ["shangeth/librispeech-mimi-codes"]
+hf_val_splits:   ["dev_clean"]
+
+multispeaker:    true
+
+eos_loss_weight: 10.0
+
+resume_from:     null
+lr:              1.0e-4
+lr_warmup_steps: 500
+lr_decay_steps:  20000
+epochs:          30
+
+checkpoint_dir:  checkpoints/v1
+log_dir:         runs/v1
+logger:          wandb
+wandb_project:   wren
+wandb_run_name:  wren-tts-360m-v1

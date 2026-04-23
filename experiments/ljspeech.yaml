@@ -1,12 +1,11 @@
-# Single-speaker LJSpeech — LJSpeech keeps its original mixed-case transcripts.
-# Inherits everything else from Config defaults (run this file via --config).
+# Single-speaker LJSpeech — mixed-case transcripts, no reference block.
 
-hf_dataset:      shangeth/ljspeech-mimi-codes
-hf_splits:       [train]
-lowercase_text:  false                      # LJSpeech is naturally mixed-case
-multispeaker:    false                      # single speaker — no reference block needed
+hf_datasets:     ["shangeth/ljspeech-mimi-codes"]
+hf_splits:       ["train"]
+hf_weights:      [1.0]
+multispeaker:    false
 
-# Per-experiment output dirs so runs don't collide.
 checkpoint_dir:  checkpoints/ljspeech
 log_dir:         runs/ljspeech
-wandb_run_name:  ljspeech-baseline
+wandb_project:   wren
+wandb_run_name:  wren-tts-ljspeech

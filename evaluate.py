@@ -83,7 +83,6 @@ def run_evaluation(
     top_p:           float,
     max_ref_frames:  int,
     whisper_model:   str,
-    lowercase_text:  bool,
     seed:            int,
     amp_dtype:       Optional[torch.dtype] = None,
 ):
@@ -111,7 +110,7 @@ def run_evaluation(
 
     per_sample = []
     for i, ex in enumerate(tqdm(eval_ds, desc="Evaluating")):
-        target_text = ex["text"].lower() if lowercase_text else ex["text"]
+        target_text = ex["text"]
 
         # --- Same-speaker reference (also feeds the model's conditioning) ---
         ref_codes_full = torch.tensor(ex["codes"], dtype=torch.long)[:cfg.k_codebooks]
@@ -240,7 +239,6 @@ def main():
         top_p            = args.top_p,
         max_ref_frames   = args.max_ref_frames,
         whisper_model    = args.whisper_model,
-        lowercase_text   = cfg.lowercase_text,
         seed             = args.seed,
         amp_dtype        = amp_dtype,
     )

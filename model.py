@@ -143,7 +143,14 @@ class TTSModel(nn.Module):
             target_k = target_labels[mask_k]                    # [N]
             valid    = target_k >= 0
             if valid.any():
-                loss_k = F.cross_entropy(logits_k[valid], target_k[valid])
+                if cb_idx == 0 and self.cfg.eos_loss_weight != 1.0:
+                    # Upweight the AUDIO_EOS class to counter the 1:~200 imbalance
+                    # (one EOS target per ~100–300 normal audio-code targets in cb0).
+                    eos_w = torch.ones(self.cfg.codebook_size + 1, device=logits_k.device)
+                    eos_w[self.AUDIO_EOS] = self.cfg.eos_loss_weight
+                    loss_k = F.cross_entropy(logits_k[valid], target_k[valid], weight=eos_w)
+                else:
+                    loss_k = F.cross_entropy(logits_k[valid], target_k[valid])
                 loss_dict[f"loss_cb{cb_idx}"] = loss_k.item()
                 w = float(cb_w[cb_idx])
                 weighted_terms.append(w * loss_k)

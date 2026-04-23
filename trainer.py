@@ -211,13 +211,20 @@ class Trainer:
     def _val_epoch(self, epoch: int) -> dict:
         self.model.eval()
         accum = _LossAccumulator()
+        eos_correct_total, eos_total_total = 0, 0
         with torch.no_grad():
             pbar = tqdm(self.val_loader, desc=f"Val   {epoch:04d}", leave=False, dynamic_ncols=True)
             for batch in pbar:
                 losses = self._val_step(batch)
+                eos_correct_total += losses.pop("eos_correct", 0)
+                eos_total_total   += losses.pop("eos_total",   0)
                 accum.update(losses)
                 pbar.set_postfix({"loss": f"{losses['loss']:.4f}"})
-        return accum.mean()
+        result = accum.mean()
+        if eos_total_total > 0:
+            result["eos_accuracy"] = eos_correct_total / eos_total_total
+            logger.info(f"Val EOS accuracy: {result['eos_accuracy']:.3f}  ({eos_correct_total}/{eos_total_total})")
+        return result
 
     # ------------------------------------------------------------------
     # Single step logic
@@ -239,16 +246,16 @@ class Trainer:
             self.scaler.scale(loss / accum_steps).backward()
             if do_update:
                 self.scaler.unscale_(self.optimizer)
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
+                loss_dict["grad_norm"] = float(grad_norm)
+                loss_dict["lr"]        = self.scheduler.get_last_lr()[0]
         else:
             logger.warning(f"step {self.global_step}: non-finite loss, skipping update")
             if do_update:
-                # No backward was called so scaler has no inf checks — skip scaler.update().
-                # Zero grads to discard any partials accumulated this window.
                 self.optimizer.zero_grad()
 
         return loss_dict
@@ -264,6 +271,31 @@ class Trainer:
             _, loss_dict = self.model(
                 input_ids, audio_mask, cb_indices, labels, attention_mask
             )
+
+        # EOS accuracy: among cb0 positions where label == AUDIO_EOS, how many are predicted correctly?
+        AUDIO_EOS = self.model.AUDIO_EOS
+        pred_cb   = cb_indices[:, 1:]
+        pred_lab  = labels[:, 1:]
+        cb0_mask  = audio_mask[:, 1:] & (pred_cb == 0)
+        eos_mask  = cb0_mask & (pred_lab == AUDIO_EOS)
+        if eos_mask.any():
+            with torch.no_grad():
+                hidden = self.model.llm.model(
+                    inputs_embeds=self.model._build_inputs_embeds(input_ids, audio_mask, cb_indices),
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                ).last_hidden_state
+                pred_hidden = hidden[:, :-1, :]
+                h_cb0  = pred_hidden[eos_mask]
+                logits = self.model.audio_heads[0](h_cb0.float())
+                preds  = logits.argmax(-1)
+                correct = (preds == AUDIO_EOS).sum().item()
+            loss_dict["eos_correct"] = correct
+            loss_dict["eos_total"]   = int(eos_mask.sum().item())
+        else:
+            loss_dict["eos_correct"] = 0
+            loss_dict["eos_total"]   = 0
+
         return loss_dict
 
     # ------------------------------------------------------------------
@@ -305,53 +337,46 @@ class Trainer:
     def _prepare_log_samples(self, n: int = 2) -> list:
         """
         Pick n fixed val examples for consistent audio logging across all steps.
-        Returns list of dicts: {text, ref_codes, audio_start_id, audio_end_id, tag}
+        Works with HFMimiDataset: uses dataset.indices + dataset.ds for row access.
         """
         dataset        = self.val_loader.dataset
         audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
         audio_end_id   = self.tokenizer.convert_tokens_to_ids("<|audio_end|>")
         total          = len(dataset)
-        # Spread evenly across val set for variety
-        indices = [int(i * total / n) for i in range(n)]
+        local_indices  = [int(i * total / n) for i in range(n)]
 
         samples = []
-        for idx in indices:
-            record = dataset.data[idx]
-            # LJSpeech: (example_id, text)  |  LibriSpeech: (utt_id, text, speaker_id)
-            text = record[1]
+        for local_idx in local_indices:
+            row_idx = dataset.indices[local_idx]
+            row     = dataset.ds[row_idx]
+            text    = row["text"]
 
             ref_codes = None
             if self.config.multispeaker:
-                # LibriSpeech: pick a fixed other clip from the same speaker
-                if hasattr(dataset, "_speaker_to_indices"):
-                    speaker_id = record[2]
-                    candidates = [i for i in dataset._speaker_to_indices.get(speaker_id, []) if i != idx]
-                    ref_idx    = candidates[0] if candidates else None
+                ref_local_idx = None
+                if dataset.has_speakers:
+                    speaker_id = row["speaker_id"]
+                    candidates = [i for i in dataset._speaker_to_indices.get(speaker_id, [])
+                                  if i != local_idx]
+                    ref_local_idx = candidates[0] if candidates else None
                 else:
-                    # LJSpeech: any other clip
-                    ref_idx = (idx + 1) % total
+                    ref_local_idx = (local_idx + 1) % total
 
-                if ref_idx is not None:
-                    ref_id = dataset.data[ref_idx][0]
-                    try:
-                        rc    = torch.load(dataset.cache_path / f"{ref_id}.pt", map_location="cpu")
-                        T_ref = min(rc.shape[1], self.config.max_ref_frames)
-                        ref_codes = rc[: self.config.k_codebooks, :T_ref]
-                    except Exception:
-                        pass
+                if ref_local_idx is not None:
+                    ref_row  = dataset.ds[dataset.indices[ref_local_idx]]
+                    rc       = torch.tensor(ref_row["codes"], dtype=torch.long)
+                    T_ref    = min(rc.shape[1], self.config.max_ref_frames)
+                    ref_codes = rc[: self.config.k_codebooks, :T_ref]
 
-            tag = f"audio/sample_{idx:04d}"
+            tag = f"audio/sample_{local_idx:04d}"
             samples.append(dict(
-                text=text,
-                ref_codes=ref_codes,
-                audio_start_id=audio_start_id if ref_codes is not None else None,
-                audio_end_id=audio_end_id   if ref_codes is not None else None,
-                tag=tag,
+                text           = text,
+                ref_codes      = ref_codes,
+                audio_start_id = audio_start_id if ref_codes is not None else None,
+                audio_end_id   = audio_end_id   if ref_codes is not None else None,
+                tag            = tag,
             ))
-            logger.info(
-                f"Log sample {idx}: '{text[:60]}'"
-                + (f"  [+ref speaker={record[2] if len(record) > 2 else 'n/a'}]" if ref_codes is not None else "")
-            )
+            logger.info(f"Log sample {local_idx}: '{text[:60]}'")
         return samples
 
     def _log_audio_samples(self, step: int):
@@ -360,7 +385,11 @@ class Trainer:
             return
 
         if self._log_samples is None:
-            self._log_samples = self._prepare_log_samples(n=2)
+            try:
+                self._log_samples = self._prepare_log_samples(n=2)
+            except Exception:
+                logger.exception("Failed to prepare audio log samples; audio logging disabled")
+                return
 
         self.model.eval()
         try:

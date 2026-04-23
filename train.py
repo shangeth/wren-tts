@@ -1,12 +1,8 @@
 """
 TTS training entry point.
 
-Reads Mimi-encoded codes from a HuggingFace dataset repo (cfg.hf_dataset). Defaults
-to LibriSpeech train-clean-{100,360}. Set --hf_dataset / --hf_splits to switch, or
-edit dataset.py for custom mixes.
-
-  python train.py
-  python train.py --hf_dataset shangeth/ljspeech-mimi-codes --hf_splits train
+  python train.py --config experiments/wren-tts-360m-v1.yaml
+  python train.py --config experiments/ljspeech.yaml
   python train.py --config my_config.yaml
   python train.py --llm_name HuggingFaceTB/SmolLM2-360M --k_codebooks 4 --batch_size 4
 """
@@ -26,7 +22,9 @@ def main():
     print("=" * 60)
     print("TTS Training")
     print(f"  llm_name:         {cfg.llm_name}")
-    print(f"  dataset:          {cfg.dataset}  (multispeaker={cfg.multispeaker})")
+    for repo, splits, w in zip(cfg.hf_datasets, cfg.hf_splits, cfg.hf_weights):
+        print(f"  dataset:          {repo}  splits={splits}  weight={w}")
+    print(f"  multispeaker:     {cfg.multispeaker}")
     print(f"  k_codebooks:      {cfg.k_codebooks}")
     print(f"  batch_size:       {cfg.batch_size}  (effective: {cfg.batch_size * cfg.grad_accum_steps})")
     print(f"  max_audio_frames: {cfg.max_audio_frames}  ({cfg.max_audio_frames / 12.5:.1f}s at 12.5fps)")

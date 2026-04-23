@@ -140,26 +140,33 @@ class HFMimiDataset(Dataset):
         self.cfg            = cfg
         self.k              = cfg.k_codebooks
         self.multispeaker   = cfg.multispeaker
-        self.lowercase_text = cfg.lowercase_text
         self.has_speakers   = "speaker_id" in hf_dataset.column_names
 
-        # Bulk column reads, then filter by length constraints.
-        n_frames_col = hf_dataset["n_frames"]
-        texts_col    = hf_dataset["text"]
-        speakers_col = hf_dataset["speaker_id"] if self.has_speakers else None
+        import numpy as np
 
-        kept_rows:          List[int] = []
-        speaker_to_indices: dict      = {}
-        for i in tqdm(range(len(hf_dataset)), desc="Filtering HF rows by length"):
-            if n_frames_col[i] > cfg.max_audio_frames:
-                continue
-            txt = texts_col[i].lower() if self.lowercase_text else texts_col[i]
-            n_text = len(tokenizer.encode(txt, add_special_tokens=False))
-            if n_text > cfg.max_text_tokens:
-                continue
-            kept_rows.append(i)
-            if self.has_speakers:
-                speaker_to_indices.setdefault(speakers_col[i], []).append(len(kept_rows) - 1)
+        # --- Vectorized n_frames filter (no Python loop) ---
+        n_frames_arr = np.array(hf_dataset["n_frames"])
+        frames_ok    = n_frames_arr <= cfg.max_audio_frames
+
+        # --- Batch tokenize in chunks (100-200x faster than per-row loop) ---
+        texts = hf_dataset["text"]
+        CHUNK = 2000
+        text_lengths = np.zeros(len(texts), dtype=np.int32)
+        for start in tqdm(range(0, len(texts), CHUNK), desc="Tokenizing dataset"):
+            batch   = texts[start : start + CHUNK]
+            lengths = tokenizer(batch, add_special_tokens=False, return_length=True)["length"]
+            text_lengths[start : start + CHUNK] = lengths
+        text_ok = text_lengths <= cfg.max_text_tokens
+
+        kept_mask = frames_ok & text_ok
+        kept_rows = list(np.where(kept_mask)[0])
+
+        # --- Speaker index (only over kept rows, fast) ---
+        speaker_to_indices: dict = {}
+        if self.has_speakers:
+            speakers_col = hf_dataset["speaker_id"]
+            for local_idx, row_idx in enumerate(kept_rows):
+                speaker_to_indices.setdefault(speakers_col[row_idx], []).append(local_idx)
 
         self.indices             = kept_rows
         self._speaker_to_indices = speaker_to_indices
@@ -182,7 +189,7 @@ class HFMimiDataset(Dataset):
         row_idx = self.indices[idx]
         ex      = self.ds[row_idx]
 
-        text = ex["text"].lower() if self.lowercase_text else ex["text"]
+        text = ex["text"]
         text_ids = self.tokenizer.encode(text, add_special_tokens=False)
 
         codes     = torch.tensor(ex["codes"], dtype=torch.long)       # [k_extracted, n_frames]
@@ -217,21 +224,62 @@ class HFMimiDataset(Dataset):
 
 
 def _load_hf_split(
-    split:          str,
-    cfg:            Config,
+    split: str,
+    cfg:   Config,
 ):
-    """Load cfg.hf_splits from cfg.hf_dataset, concatenate, and return the train|val partition."""
+    """Load and combine all datasets from cfg.hf_datasets, return the train|val partition.
+
+    Each entry in hf_datasets/hf_splits/hf_weights is one dataset source:
+      - hf_splits[i]  : comma-sep HF split names (concatenated within the same repo)
+      - hf_weights[i] : fraction in (0, 1] — 1.0 = full dataset, 0.2 = 20% (fixed at load time)
+    """
     from datasets import load_dataset, concatenate_datasets
 
-    parts = [load_dataset(cfg.hf_dataset, split=s) for s in cfg.hf_splits]
-    ds    = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
+    # Pad hf_weights to len(hf_datasets) in case user omits trailing 1.0s
+    weights = list(cfg.hf_weights) + [1.0] * max(0, len(cfg.hf_datasets) - len(cfg.hf_weights))
 
-    n     = len(ds)
-    n_val = max(1, int(n * cfg.val_fraction))
+    sources = []
+    for repo, splits_str, weight in zip(cfg.hf_datasets, cfg.hf_splits, weights):
+        split_names = [s.strip() for s in splits_str.split(",")]
+        parts = [load_dataset(repo, split=s) for s in split_names]
+        ds    = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
+
+        if weight < 1.0:
+            n = max(1, int(len(ds) * weight))
+            ds = ds.shuffle(seed=42).select(range(n))
+            logger.info(f"  {repo} [{splits_str}]: using {n}/{len(ds)} rows (weight={weight})")
+        else:
+            logger.info(f"  {repo} [{splits_str}]: using all {len(ds)} rows")
+
+        sources.append(ds)
+
+    combined = concatenate_datasets(sources) if len(sources) > 1 else sources[0]
+
+    use_explicit_val = bool(cfg.hf_val_datasets)
+
     if split == "train":
-        return ds.select(range(n - n_val))
+        if use_explicit_val:
+            # Explicit val datasets defined — train gets all its data.
+            return combined
+        # Fallback: carve val_fraction off the tail.
+        n = len(combined)
+        n_val = max(1, int(n * cfg.val_fraction))
+        return combined.select(range(n - n_val))
+
     if split == "val":
-        return ds.select(range(n - n_val, n))
+        if use_explicit_val:
+            val_parts = []
+            for repo, splits_str in zip(cfg.hf_val_datasets, cfg.hf_val_splits):
+                split_names = [s.strip() for s in splits_str.split(",")]
+                parts = [load_dataset(repo, split=s) for s in split_names]
+                val_parts.append(concatenate_datasets(parts) if len(parts) > 1 else parts[0])
+                logger.info(f"  val: {repo} [{splits_str}]: {val_parts[-1].num_rows} rows")
+            return concatenate_datasets(val_parts) if len(val_parts) > 1 else val_parts[0]
+        # Fallback: tail fraction of combined train data.
+        n = len(combined)
+        n_val = max(1, int(n * cfg.val_fraction))
+        return combined.select(range(n - n_val, n))
+
     raise ValueError(f"Unknown split: {split!r}")
 
 
