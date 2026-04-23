@@ -27,8 +27,8 @@ lr_warmup_steps: 500
 lr_decay_steps:  20000
 epochs:          30
 
-checkpoint_dir:  checkpoints/v1-c8
-log_dir:         runs/v1-c8
+checkpoint_dir:  checkpoints/v1-c8-delay
+log_dir:         runs/v1-c8-delay
 logger:          wandb
 wandb_project:   wren
-wandb_run_name:  wren-tts-360m-v1-c8
+wandb_run_name:  wren-tts-360m-v1-c8-delay

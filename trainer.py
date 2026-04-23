@@ -90,9 +90,16 @@ class Trainer:
             weight_decay=config.weight_decay,
         )
 
-        # Steps per epoch (approximate — used to compute total steps if needed)
+        # Steps per epoch (approximate — used to compute total steps if needed).
+        # lr_decay_steps is a FLOOR, not a cap: the cosine schedule spans the full run
+        # when epochs × steps_per_epoch exceeds it (which is the usual case).
         steps_per_epoch = max(1, len(train_loader) // config.grad_accum_steps)
         total_steps = max(config.lr_decay_steps, steps_per_epoch * config.epochs)
+        logger.info(
+            f"LR schedule: cosine decay from {config.lr:.2e} to 0 over {total_steps} steps "
+            f"(warmup={config.lr_warmup_steps}, steps/epoch≈{steps_per_epoch}, epochs={config.epochs}, "
+            f"lr_decay_steps floor={config.lr_decay_steps})"
+        )
 
         self.scheduler = get_cosine_schedule_with_warmup(
             self.optimizer,
