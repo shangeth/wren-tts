@@ -1,12 +1,25 @@
 """
-Training data for Wren-TTS.
+Training data for Wren-TTS — delay-pattern layout.
 
-Reads Mimi-encoded codes + transcripts from a single HuggingFace dataset repo
-(`cfg.hf_dataset`, with `cfg.hf_splits`), concatenates the requested splits, and
-deterministically partitions off the tail as a val split.
+Reads Mimi-encoded codes + transcripts from HuggingFace dataset repos, concatenates
+the requested splits, and deterministically partitions off the tail as a val split.
 
-For custom dataset mixes (e.g. combining LJSpeech with a slice of LibriSpeech),
-build the `hf_dataset` argument to `HFMimiDataset` however you want right here.
+Sequence layout (single-speaker):
+  [ text... | <audio_start> | tgt_delayed ]
+
+Sequence layout (multispeaker):
+  [ <reference_start> | ref_delayed | <reference_end> | text... | <audio_start> | tgt_delayed ]
+
+Audio blocks are laid out in MusicGen-style delay pattern: at step s, codebook q holds
+frame s-q (or PAD at the leading/trailing edges). Total audio steps per block = T + k - 1.
+cb0's AUDIO_EOS label is placed at step T of the target block (one past the last real frame).
+
+Per-sample output tensors:
+  input_ids     [L]    int64  — text/special-token IDs; 0 at audio positions (unused by embed)
+  audio_codes   [L,k]  int64  — per-codebook input; AUDIO_PAD at non-audio and invalid delay edges
+  audio_mask    [L]    bool   — True at audio steps (ref or target)
+  labels        [L,k]  int64  — per-codebook target; -100 at text/ref/invalid; AUDIO_EOS for cb0 at step T
+  attention_mask[L]    int64  — 1 everywhere, 0 at batch padding
 """
 
 import logging
@@ -23,94 +36,127 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
+def apply_delay(codes: torch.LongTensor, k: int, pad: int) -> torch.LongTensor:
+    """
+    Apply MusicGen-style delay to a [k, T] code matrix.
+
+    Returns [k, T + k - 1] where delayed[q, q:q+T] = codes[q, :] and other positions are `pad`.
+    At step s, codebook q holds frame s-q if 0 <= s-q < T, else pad.
+    """
+    assert codes.dim() == 2 and codes.shape[0] == k, f"expected [k={k}, T], got {tuple(codes.shape)}"
+    T = codes.shape[1]
+    L = T + k - 1
+    delayed = torch.full((k, L), pad, dtype=torch.long)
+    for q in range(k):
+        delayed[q, q:q + T] = codes[q]
+    return delayed
+
+
+def undelay(delayed: torch.LongTensor, k: int, T: int) -> torch.LongTensor:
+    """
+    Inverse of apply_delay. Given a [k, T + k - 1] delayed matrix (or longer), recover [k, T].
+    """
+    assert delayed.dim() == 2 and delayed.shape[0] == k
+    assert delayed.shape[1] >= T + k - 1, f"need at least {T + k - 1} steps, got {delayed.shape[1]}"
+    out = torch.empty((k, T), dtype=delayed.dtype)
+    for q in range(k):
+        out[q] = delayed[q, q:q + T]
+    return out
+
+
 def _build_sequence(
-    text_ids:       List[int],
-    tgt_codes:      torch.LongTensor,   # [k, T_frames]
-    audio_sep_id:   int,
-    k:              int,
-    codebook_size:  int,
-    ref_codes:      Optional[torch.LongTensor] = None,  # [k, T_ref] or None
-    audio_start_id: Optional[int] = None,
-    audio_end_id:   Optional[int] = None,
+    text_ids:          List[int],
+    tgt_codes:         torch.LongTensor,   # [k, T_tgt]
+    audio_start_id:    int,                # <|audio_start|> — text→target marker
+    k:                 int,
+    codebook_size:     int,
+    ref_codes:         Optional[torch.LongTensor] = None,  # [k, T_ref] or None
+    reference_start_id: Optional[int] = None,
+    reference_end_id:   Optional[int] = None,
 ) -> dict:
     """
-    Build one training sequence.
+    Build one training sequence in delay-pattern layout.
 
-    Single-speaker:  [ text... | <audio_sep> | tgt_codes... | eos_sentinel ]
-    Multispeaker:    [ <audio_start> | ref_codes... | <audio_end> | text... | <audio_sep> | tgt_codes... | eos_sentinel ]
-
-    Labels: -100 everywhere except tgt_codes positions and the eos_sentinel (which
-    supervises cb0 → AUDIO_EOS). Reference codes are context-only (labels=-100).
+    Labels:
+      - Text + special tokens: -100
+      - Reference audio steps: -100 (context-only)
+      - Target audio steps: actual codes at valid positions, -100 at leading/trailing PAD edges
+      - cb0 at step T (first post-target step within the target delay window) = AUDIO_EOS
     """
-    AUDIO_EOS = codebook_size  # = 2048
+    AUDIO_PAD = codebook_size       # = 2048 (input-side; also the PAD-label in labels tensor)
+    AUDIO_EOS = codebook_size       # = 2048 (cb0 output-class meaning "stop")
 
-    T = tgt_codes.shape[1]
-    tgt_audio_tokens = tgt_codes.T.reshape(-1)        # [T*k]
-    n_tgt = len(tgt_audio_tokens)
-    tgt_cb_indices = torch.arange(n_tgt) % k
+    def _text_part(ids_list: List[int]):
+        """Text-mode segment: audio_codes=PAD, audio_mask=False, labels=-100."""
+        n = len(ids_list)
+        return dict(
+            input_ids      = torch.tensor(ids_list, dtype=torch.long),
+            audio_codes    = torch.full((n, k), AUDIO_PAD, dtype=torch.long),
+            audio_mask     = torch.zeros(n, dtype=torch.bool),
+            labels         = torch.full((n, k), -100, dtype=torch.long),
+        )
 
-    parts_ids:    List[torch.Tensor] = []
-    parts_amask:  List[torch.Tensor] = []
-    parts_cb:     List[torch.Tensor] = []
-    parts_labels: List[torch.Tensor] = []
+    def _audio_part(codes: torch.LongTensor, supervise: bool, eos_at_T: bool):
+        """
+        Audio-mode delayed segment.
 
-    # Optional reference block
-    if ref_codes is not None and audio_start_id is not None and audio_end_id is not None:
-        T_ref = ref_codes.shape[1]
-        ref_tokens = ref_codes.T.reshape(-1)           # [T_ref*k]
-        n_ref = len(ref_tokens)
-        ref_cb_indices = torch.arange(n_ref) % k
+        Args:
+            codes:     [k, T] real codes
+            supervise: True for target block (labels = codes at valid positions),
+                       False for reference block (all labels = -100)
+            eos_at_T:  if True, cb0's label at step T (first post-target step within
+                       the delay window) is AUDIO_EOS. Only True for the target block.
+        """
+        T = codes.shape[1]
+        L = T + k - 1
+        # Input-side codes with PAD at edges
+        delayed = apply_delay(codes, k, AUDIO_PAD)  # [k, L]
 
-        parts_ids.append(torch.tensor([audio_start_id], dtype=torch.long))
-        parts_amask.append(torch.zeros(1, dtype=torch.bool))
-        parts_cb.append(torch.zeros(1, dtype=torch.long))
-        parts_labels.append(torch.full((1,), -100, dtype=torch.long))
+        # Labels: default -100
+        lab = torch.full((k, L), -100, dtype=torch.long)
+        if supervise:
+            for q in range(k):
+                lab[q, q:q + T] = codes[q]
+            if eos_at_T and k >= 2:
+                # cb0 emits AUDIO_EOS at step T (one past last real cb0 frame).
+                # Column T exists in the delay window iff k >= 2 (since L = T + k - 1 > T).
+                # cb0's input at this step is PAD (frame T has no real data); its label is EOS.
+                lab[0, T] = AUDIO_EOS
 
-        parts_ids.append(ref_tokens)
-        parts_amask.append(torch.ones(n_ref, dtype=torch.bool))
-        parts_cb.append(ref_cb_indices)
-        parts_labels.append(torch.full((n_ref,), -100, dtype=torch.long))
+        return dict(
+            input_ids   = torch.zeros(L, dtype=torch.long),  # unused at audio steps
+            audio_codes = delayed.T.contiguous(),            # [L, k]
+            audio_mask  = torch.ones(L, dtype=torch.bool),
+            labels      = lab.T.contiguous(),                # [L, k]
+        )
 
-        parts_ids.append(torch.tensor([audio_end_id], dtype=torch.long))
-        parts_amask.append(torch.zeros(1, dtype=torch.bool))
-        parts_cb.append(torch.zeros(1, dtype=torch.long))
-        parts_labels.append(torch.full((1,), -100, dtype=torch.long))
+    parts: List[dict] = []
 
-    # Text tokens
-    text_tensor = torch.tensor(text_ids, dtype=torch.long)
-    parts_ids.append(text_tensor)
-    parts_amask.append(torch.zeros(len(text_ids), dtype=torch.bool))
-    parts_cb.append(torch.zeros(len(text_ids), dtype=torch.long))
-    parts_labels.append(torch.full((len(text_ids),), -100, dtype=torch.long))
+    # --- Optional reference block ---
+    if ref_codes is not None and reference_start_id is not None and reference_end_id is not None:
+        parts.append(_text_part([reference_start_id]))
+        parts.append(_audio_part(ref_codes, supervise=False, eos_at_T=False))
+        parts.append(_text_part([reference_end_id]))
 
-    # <audio_sep>
-    parts_ids.append(torch.tensor([audio_sep_id], dtype=torch.long))
-    parts_amask.append(torch.zeros(1, dtype=torch.bool))
-    parts_cb.append(torch.zeros(1, dtype=torch.long))
-    parts_labels.append(torch.full((1,), -100, dtype=torch.long))
+    # --- Text ---
+    parts.append(_text_part(list(text_ids)))
 
-    # Target audio tokens
-    parts_ids.append(tgt_audio_tokens)
-    parts_amask.append(torch.ones(n_tgt, dtype=torch.bool))
-    parts_cb.append(tgt_cb_indices)
-    parts_labels.append(tgt_audio_tokens.clone())
+    # --- <audio_start> (text→target marker) ---
+    parts.append(_text_part([audio_start_id]))
 
-    # EOS sentinel (input value irrelevant; label = AUDIO_EOS for cb0 head)
-    parts_ids.append(torch.tensor([0], dtype=torch.long))
-    parts_amask.append(torch.ones(1, dtype=torch.bool))
-    parts_cb.append(torch.zeros(1, dtype=torch.long))
-    parts_labels.append(torch.tensor([AUDIO_EOS], dtype=torch.long))
+    # --- Target audio block (delay, supervised, EOS at step T) ---
+    parts.append(_audio_part(tgt_codes, supervise=True, eos_at_T=True))
 
-    input_ids      = torch.cat(parts_ids)
-    audio_mask     = torch.cat(parts_amask)
-    cb_indices     = torch.cat(parts_cb)
-    labels         = torch.cat(parts_labels)
-    attention_mask = torch.ones(len(input_ids), dtype=torch.long)
+    input_ids   = torch.cat([p["input_ids"]   for p in parts], dim=0)
+    audio_codes = torch.cat([p["audio_codes"] for p in parts], dim=0)
+    audio_mask  = torch.cat([p["audio_mask"]  for p in parts], dim=0)
+    labels      = torch.cat([p["labels"]      for p in parts], dim=0)
+    attention_mask = torch.ones(input_ids.shape[0], dtype=torch.long)
 
     return {
         "input_ids":      input_ids,
+        "audio_codes":    audio_codes,
         "audio_mask":     audio_mask,
-        "cb_indices":     cb_indices,
         "labels":         labels,
         "attention_mask": attention_mask,
     }
@@ -127,20 +173,20 @@ class HFMimiDataset(Dataset):
         self,
         hf_dataset,
         tokenizer,
-        audio_sep_id:   int,
-        cfg:            Config,
-        audio_start_id: Optional[int] = None,
-        audio_end_id:   Optional[int] = None,
+        audio_start_id:     int,
+        cfg:                Config,
+        reference_start_id: Optional[int] = None,
+        reference_end_id:   Optional[int] = None,
     ):
-        self.ds             = hf_dataset
-        self.tokenizer      = tokenizer
-        self.audio_sep_id   = audio_sep_id
-        self.audio_start_id = audio_start_id
-        self.audio_end_id   = audio_end_id
-        self.cfg            = cfg
-        self.k              = cfg.k_codebooks
-        self.multispeaker   = cfg.multispeaker
-        self.has_speakers   = "speaker_id" in hf_dataset.column_names
+        self.ds                 = hf_dataset
+        self.tokenizer          = tokenizer
+        self.audio_start_id     = audio_start_id
+        self.reference_start_id = reference_start_id
+        self.reference_end_id   = reference_end_id
+        self.cfg                = cfg
+        self.k                  = cfg.k_codebooks
+        self.multispeaker       = cfg.multispeaker
+        self.has_speakers       = "speaker_id" in hf_dataset.column_names
 
         import numpy as np
 
@@ -196,7 +242,7 @@ class HFMimiDataset(Dataset):
         tgt_codes = codes[: self.k, : self.cfg.max_audio_frames]
 
         ref_codes = None
-        if self.multispeaker and self.audio_start_id is not None:
+        if self.multispeaker and self.reference_start_id is not None:
             ref_idx: Optional[int] = None
             if self.has_speakers:
                 candidates = [i for i in self._speaker_to_indices.get(ex["speaker_id"], []) if i != idx]
@@ -212,14 +258,14 @@ class HFMimiDataset(Dataset):
                 ref_codes = rc[: self.k, :T_ref]
 
         return _build_sequence(
-            text_ids       = text_ids,
-            tgt_codes      = tgt_codes,
-            audio_sep_id   = self.audio_sep_id,
-            k              = self.k,
-            codebook_size  = self.cfg.codebook_size,
-            ref_codes      = ref_codes,
-            audio_start_id = self.audio_start_id,
-            audio_end_id   = self.audio_end_id,
+            text_ids           = text_ids,
+            tgt_codes          = tgt_codes,
+            audio_start_id     = self.audio_start_id,
+            k                  = self.k,
+            codebook_size      = self.cfg.codebook_size,
+            ref_codes          = ref_codes,
+            reference_start_id = self.reference_start_id,
+            reference_end_id   = self.reference_end_id,
         )
 
 
@@ -283,52 +329,66 @@ def _load_hf_split(
     raise ValueError(f"Unknown split: {split!r}")
 
 
-def collate_fn(batch: List[dict]) -> dict:
-    """Dynamic padding to the longest sequence in the batch."""
-    max_len = max(b["input_ids"].shape[0] for b in batch)
+def make_collate_fn(codebook_size: int):
+    """Build a collator closed over `codebook_size`, which is the AUDIO_PAD index."""
+    AUDIO_PAD = codebook_size
 
-    input_ids_list      = []
-    audio_mask_list     = []
-    cb_indices_list     = []
-    labels_list         = []
-    attention_mask_list = []
+    def collate_fn(batch: List[dict]) -> dict:
+        max_len = max(b["input_ids"].shape[0] for b in batch)
+        k       = batch[0]["audio_codes"].shape[1]
 
-    for b in batch:
-        L   = b["input_ids"].shape[0]
-        pad = max_len - L
+        input_ids_list      = []
+        audio_codes_list    = []
+        audio_mask_list     = []
+        labels_list         = []
+        attention_mask_list = []
 
-        input_ids_list.append(F.pad(b["input_ids"],          (0, pad), value=0))
-        audio_mask_list.append(F.pad(b["audio_mask"].long(), (0, pad), value=0).bool())
-        cb_indices_list.append(F.pad(b["cb_indices"],        (0, pad), value=0))
-        labels_list.append(F.pad(b["labels"],                (0, pad), value=-100))
-        attention_mask_list.append(F.pad(b["attention_mask"],(0, pad), value=0))
+        for b in batch:
+            L   = b["input_ids"].shape[0]
+            pad = max_len - L
 
-    return {
-        "input_ids":      torch.stack(input_ids_list),
-        "audio_mask":     torch.stack(audio_mask_list),
-        "cb_indices":     torch.stack(cb_indices_list),
-        "labels":         torch.stack(labels_list),
-        "attention_mask": torch.stack(attention_mask_list),
-    }
+            input_ids_list.append(F.pad(b["input_ids"], (0, pad), value=0))
+
+            if pad > 0:
+                pad_codes  = torch.full((pad, k), AUDIO_PAD, dtype=torch.long)
+                pad_labels = torch.full((pad, k), -100,      dtype=torch.long)
+                audio_codes_list.append(torch.cat([b["audio_codes"], pad_codes],  dim=0))
+                labels_list.append(     torch.cat([b["labels"],      pad_labels], dim=0))
+            else:
+                audio_codes_list.append(b["audio_codes"])
+                labels_list.append(     b["labels"])
+
+            audio_mask_list.append(F.pad(b["audio_mask"].long(), (0, pad), value=0).bool())
+            attention_mask_list.append(F.pad(b["attention_mask"], (0, pad), value=0))
+
+        return {
+            "input_ids":      torch.stack(input_ids_list),
+            "audio_codes":    torch.stack(audio_codes_list),
+            "audio_mask":     torch.stack(audio_mask_list),
+            "labels":         torch.stack(labels_list),
+            "attention_mask": torch.stack(attention_mask_list),
+        }
+
+    return collate_fn
 
 
 def get_dataloader(
-    split:          str,
+    split:              str,
     tokenizer,
-    audio_sep_id:   int,
-    cfg:            Config,
-    shuffle:        bool = True,
-    audio_start_id: Optional[int] = None,
-    audio_end_id:   Optional[int] = None,
+    audio_start_id:     int,
+    cfg:                Config,
+    shuffle:            bool = True,
+    reference_start_id: Optional[int] = None,
+    reference_end_id:   Optional[int] = None,
 ) -> DataLoader:
     hf_ds = _load_hf_split(split, cfg)
     dataset = HFMimiDataset(
         hf_ds,
-        tokenizer      = tokenizer,
-        audio_sep_id   = audio_sep_id,
-        cfg            = cfg,
-        audio_start_id = audio_start_id,
-        audio_end_id   = audio_end_id,
+        tokenizer          = tokenizer,
+        audio_start_id     = audio_start_id,
+        cfg                = cfg,
+        reference_start_id = reference_start_id,
+        reference_end_id   = reference_end_id,
     )
     return DataLoader(
         dataset,
@@ -338,7 +398,7 @@ def get_dataloader(
         pin_memory         = cfg.pin_memory,
         prefetch_factor    = cfg.prefetch_factor if cfg.num_workers > 0 else None,
         persistent_workers = cfg.num_workers > 0,
-        collate_fn         = collate_fn,
+        collate_fn         = make_collate_fn(cfg.codebook_size),
     )
 
 
@@ -352,24 +412,23 @@ if __name__ == "__main__":
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.add_special_tokens({
         "additional_special_tokens": [
-            "<|audio_sep|>", "<|audio_eos|>",
-            "<|audio_start|>", "<|audio_end|>",
+            "<|audio_start|>", "<|reference_start|>", "<|reference_end|>",
         ]
     })
-    audio_sep_id   = tokenizer.convert_tokens_to_ids("<|audio_sep|>")
-    audio_start_id = tokenizer.convert_tokens_to_ids("<|audio_start|>")
-    audio_end_id   = tokenizer.convert_tokens_to_ids("<|audio_end|>")
+    audio_start_id     = tokenizer.convert_tokens_to_ids("<|audio_start|>")
+    reference_start_id = tokenizer.convert_tokens_to_ids("<|reference_start|>")
+    reference_end_id   = tokenizer.convert_tokens_to_ids("<|reference_end|>")
 
     loader = get_dataloader(
-        "train", tokenizer, audio_sep_id, cfg, shuffle=False,
-        audio_start_id=audio_start_id, audio_end_id=audio_end_id,
+        "train", tokenizer, audio_start_id, cfg, shuffle=False,
+        reference_start_id=reference_start_id, reference_end_id=reference_end_id,
     )
     batch = next(iter(loader))
 
     print(f"input_ids:      {batch['input_ids'].shape}")
+    print(f"audio_codes:    {batch['audio_codes'].shape}  (PAD count: {(batch['audio_codes'] == cfg.codebook_size).sum().item()})")
     print(f"audio_mask:     {batch['audio_mask'].shape}  (True count: {batch['audio_mask'].sum().item()})")
-    print(f"cb_indices:     {batch['cb_indices'].shape}")
-    print(f"labels:         {batch['labels'].shape}  (non-100 count: {(batch['labels'] >= 0).sum().item()})")
+    print(f"labels:         {batch['labels'].shape}  (supervised count: {(batch['labels'] >= 0).sum().item()})")
     print(f"attention_mask: {batch['attention_mask'].shape}")
     valid_labels = batch["labels"][batch["labels"] >= 0]
     print(f"label range: [{valid_labels.min().item()}, {valid_labels.max().item()}]  (expected [0, 2048])")

@@ -50,3 +50,5 @@ secrets*
 .idea/
 *.swp
 .claude/
+session_logs/
+tests/

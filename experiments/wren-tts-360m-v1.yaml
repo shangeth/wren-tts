@@ -16,6 +16,11 @@ multispeaker:    true
 
 eos_loss_weight: 50.0
 
+# Batch sizing: A100-40GB benchmark at bs=16, k=8 delay uses ~21 GB peak / 0.34s/step.
+# Effective batch = 32 (bs=16 × grad_accum=2) is a good default for 360M.
+batch_size:       16
+grad_accum_steps: 2
+
 resume_from:     null
 lr:              1.0e-4
 lr_warmup_steps: 500

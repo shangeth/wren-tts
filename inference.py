@@ -49,8 +49,7 @@ def load_model_and_tokenizer(
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.add_special_tokens({
         "additional_special_tokens": [
-            "<|audio_sep|>", "<|audio_eos|>",
-            "<|audio_start|>", "<|audio_end|>",
+            "<|audio_start|>", "<|reference_start|>", "<|reference_end|>",
         ]
     })
 
@@ -89,14 +88,14 @@ def text_to_speech(
     # match that distribution at inference.
     text = text.lower()
 
-    ref_codes      = None
-    audio_start_id = None
-    audio_end_id   = None
+    ref_codes          = None
+    reference_start_id = None
+    reference_end_id   = None
 
     if ref_audio_path is not None:
         import torchaudio as _ta
-        audio_start_id = tokenizer.convert_tokens_to_ids("<|audio_start|>")
-        audio_end_id   = tokenizer.convert_tokens_to_ids("<|audio_end|>")
+        reference_start_id = tokenizer.convert_tokens_to_ids("<|reference_start|>")
+        reference_end_id   = tokenizer.convert_tokens_to_ids("<|reference_end|>")
         wav, sr = _ta.load(ref_audio_path)
         ref_codes = mimi_codec.encode(wav, sr)                        # [k, T_ref]
         T_ref     = min(ref_codes.shape[1], max_ref_frames)
@@ -111,8 +110,8 @@ def text_to_speech(
         top_k=top_k,
         top_p=top_p,
         ref_codes=ref_codes,
-        audio_start_id=audio_start_id,
-        audio_end_id=audio_end_id,
+        reference_start_id=reference_start_id,
+        reference_end_id=reference_end_id,
     )  # [k, n_frames]
     waveform = mimi_codec.decode(codes)  # [1, T]
     return waveform

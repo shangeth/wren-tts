@@ -68,15 +68,15 @@ def convert_checkpoint_to_hf_repo(checkpoint_path: Path, staging: Path) -> None:
     saved_cfg  = ckpt["config"]
     state_dict = ckpt["model"]
 
-    # --- Tokenizer: base + our 4 special tokens ---
+    # --- Tokenizer: base + delay-pattern special tokens ---
     tokenizer = AutoTokenizer.from_pretrained(saved_cfg["llm_name"])
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.add_special_tokens({"additional_special_tokens": [
-        "<|audio_sep|>", "<|audio_eos|>", "<|audio_start|>", "<|audio_end|>",
+        "<|audio_start|>", "<|reference_start|>", "<|reference_end|>",
     ]})
 
-    # --- Config ---
+    # --- Config (new delay-pattern format) ---
     vocab_size = _infer_resized_vocab(state_dict)
     cfg = WrenConfig(
         llm_name           = saved_cfg["llm_name"],
@@ -84,13 +84,13 @@ def convert_checkpoint_to_hf_repo(checkpoint_path: Path, staging: Path) -> None:
         k_codebooks        = saved_cfg["k_codebooks"],
         codebook_size      = saved_cfg["codebook_size"],
         vocab_size         = vocab_size,
-        audio_sep_id       = tokenizer.convert_tokens_to_ids("<|audio_sep|>"),
-        audio_eos_token_id = tokenizer.convert_tokens_to_ids("<|audio_eos|>"),
+        pattern            = "delay",
         audio_start_id     = tokenizer.convert_tokens_to_ids("<|audio_start|>"),
-        audio_end_id       = tokenizer.convert_tokens_to_ids("<|audio_end|>"),
+        reference_start_id = tokenizer.convert_tokens_to_ids("<|reference_start|>"),
+        reference_end_id   = tokenizer.convert_tokens_to_ids("<|reference_end|>"),
     )
     cfg.auto_map = AUTO_MAP_MODEL
-    print(f"Config built: vocab_size={vocab_size}, k={cfg.k_codebooks}")
+    print(f"Config built: vocab_size={vocab_size}, k={cfg.k_codebooks}, pattern={cfg.pattern}")
 
     # --- Build model shell, load weights ---
     print("Building WrenForTTS from config (no pretrained backbone download) ...")

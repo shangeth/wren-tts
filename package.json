@@ -1,8 +1,0 @@
-{
-  "devDependencies": {
-    "fallow": "^2.48.0"
-  },
-  "dependencies": {
-    "@fallow-cli/fallow-node": "^2.48.0"
-  }
-}

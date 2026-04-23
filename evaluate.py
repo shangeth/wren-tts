@@ -47,7 +47,7 @@ def load_model(checkpoint_path: str, device: torch.device):
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.add_special_tokens({"additional_special_tokens": [
-        "<|audio_sep|>", "<|audio_eos|>", "<|audio_start|>", "<|audio_end|>",
+        "<|audio_start|>", "<|reference_start|>", "<|reference_end|>",
     ]})
 
     model = TTSModel(cfg, tokenizer).to(device).eval()
@@ -93,9 +93,8 @@ def run_evaluation(
     secs   = SECS(device=str(device))
     eer    = EER()
 
-    audio_sep_id   = tokenizer.convert_tokens_to_ids("<|audio_sep|>")
-    audio_start_id = tokenizer.convert_tokens_to_ids("<|audio_start|>")
-    audio_end_id   = tokenizer.convert_tokens_to_ids("<|audio_end|>")
+    reference_start_id = tokenizer.convert_tokens_to_ids("<|reference_start|>")
+    reference_end_id   = tokenizer.convert_tokens_to_ids("<|reference_end|>")
 
     has_speakers = "speaker_id" in eval_ds.column_names
     rng = random.Random(seed)
@@ -130,16 +129,16 @@ def run_evaluation(
         # --- Generate ---
         with amp_ctx:
             codes = model.generate(
-                text             = target_text,
-                tokenizer        = tokenizer,
-                max_audio_frames = max_audio_frames,
-                min_audio_frames = min_audio_frames,
-                temperature      = temperature,
-                top_k            = top_k,
-                top_p            = top_p,
-                ref_codes        = ref_codes_cond,
-                audio_start_id   = audio_start_id,
-                audio_end_id     = audio_end_id,
+                text               = target_text,
+                tokenizer          = tokenizer,
+                max_audio_frames   = max_audio_frames,
+                min_audio_frames   = min_audio_frames,
+                temperature        = temperature,
+                top_k              = top_k,
+                top_p              = top_p,
+                ref_codes          = ref_codes_cond,
+                reference_start_id = reference_start_id,
+                reference_end_id   = reference_end_id,
             )
         if codes.shape[1] == 0:
             # model produced nothing — record a dummy sample and skip

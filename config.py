@@ -16,7 +16,7 @@ class Config:
 
     # --- Mimi codec ---
     mimi_model_name:       str   = "kyutai/mimi"
-    k_codebooks:           int   = 3          # codebooks to USE during training (HF datasets ship 8)
+    k_codebooks:           int   = 8          # codebooks to USE during training (HF datasets ship 8). Delay pattern makes k=8 tractable.
     codebook_size:         int   = 2048       # Mimi codebook vocab size (fixed)
 
     # --- Data (HuggingFace datasets only) ---
@@ -62,7 +62,7 @@ class Config:
     compile_model:         bool  = False
     # Per-codebook loss weights (cb0..cb_{k-1}). Truncated / padded to k via last value.
     # Normalized as a weighted average, so [1, 0.5, 0.5] and [2, 1, 1] are equivalent.
-    cb_loss_weights:       List[float] = field(default_factory=lambda: [1.0, 0.5, 0.5])
+    cb_loss_weights:       List[float] = field(default_factory=lambda: [1.0, 0.5, 0.5, 0.25, 0.25, 0.25, 0.25, 0.25])
 
     # --- Checkpointing ---
     checkpoint_dir:        str   = "checkpoints"

@@ -232,14 +232,14 @@ class Trainer:
 
     def _train_step(self, batch: dict, accum_steps: int = 1, do_update: bool = True) -> dict:
         input_ids      = batch["input_ids"].to(self.device)
+        audio_codes    = batch["audio_codes"].to(self.device)
         audio_mask     = batch["audio_mask"].to(self.device)
-        cb_indices     = batch["cb_indices"].to(self.device)
         labels         = batch["labels"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
 
         with autocast(self._device_type, dtype=self._amp_dtype, enabled=self.config.use_amp):
             loss, loss_dict = self.model(
-                input_ids, audio_mask, cb_indices, labels, attention_mask
+                input_ids, audio_codes, audio_mask, labels, attention_mask
             )
 
         if torch.isfinite(loss):
@@ -262,31 +262,29 @@ class Trainer:
 
     def _val_step(self, batch: dict) -> dict:
         input_ids      = batch["input_ids"].to(self.device)
+        audio_codes    = batch["audio_codes"].to(self.device)
         audio_mask     = batch["audio_mask"].to(self.device)
-        cb_indices     = batch["cb_indices"].to(self.device)
         labels         = batch["labels"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
 
         with autocast(self._device_type, dtype=self._amp_dtype, enabled=self.config.use_amp):
             _, loss_dict = self.model(
-                input_ids, audio_mask, cb_indices, labels, attention_mask
+                input_ids, audio_codes, audio_mask, labels, attention_mask
             )
 
-        # EOS accuracy: among cb0 positions where label == AUDIO_EOS, how many are predicted correctly?
+        # EOS accuracy: at shifted cb0 positions where label == AUDIO_EOS, how often do we predict EOS?
         AUDIO_EOS = self.model.AUDIO_EOS
-        pred_cb   = cb_indices[:, 1:]
-        pred_lab  = labels[:, 1:]
-        cb0_mask  = audio_mask[:, 1:] & (pred_cb == 0)
-        eos_mask  = cb0_mask & (pred_lab == AUDIO_EOS)
+        target_cb0 = labels[:, 1:, 0]                          # [B, L-1]
+        eos_mask   = target_cb0 == AUDIO_EOS                    # [B, L-1]
         if eos_mask.any():
             with torch.no_grad():
                 hidden = self.model.llm.model(
-                    inputs_embeds=self.model._build_inputs_embeds(input_ids, audio_mask, cb_indices),
+                    inputs_embeds=self.model._build_inputs_embeds(input_ids, audio_codes, audio_mask),
                     attention_mask=attention_mask,
                     use_cache=False,
                 ).last_hidden_state
                 pred_hidden = hidden[:, :-1, :]
-                h_cb0  = pred_hidden[eos_mask]
+                h_cb0  = pred_hidden[eos_mask]                  # [N, H]
                 logits = self.model.audio_heads[0](h_cb0.float())
                 preds  = logits.argmax(-1)
                 correct = (preds == AUDIO_EOS).sum().item()
@@ -339,11 +337,11 @@ class Trainer:
         Pick n fixed val examples for consistent audio logging across all steps.
         Works with HFMimiDataset: uses dataset.indices + dataset.ds for row access.
         """
-        dataset        = self.val_loader.dataset
-        audio_start_id = self.tokenizer.convert_tokens_to_ids("<|audio_start|>")
-        audio_end_id   = self.tokenizer.convert_tokens_to_ids("<|audio_end|>")
-        total          = len(dataset)
-        local_indices  = [int(i * total / n) for i in range(n)]
+        dataset            = self.val_loader.dataset
+        reference_start_id = self.tokenizer.convert_tokens_to_ids("<|reference_start|>")
+        reference_end_id   = self.tokenizer.convert_tokens_to_ids("<|reference_end|>")
+        total              = len(dataset)
+        local_indices      = [int(i * total / n) for i in range(n)]
 
         samples = []
         for local_idx in local_indices:
@@ -370,11 +368,11 @@ class Trainer:
 
             tag = f"audio/sample_{local_idx:04d}"
             samples.append(dict(
-                text           = text,
-                ref_codes      = ref_codes,
-                audio_start_id = audio_start_id if ref_codes is not None else None,
-                audio_end_id   = audio_end_id   if ref_codes is not None else None,
-                tag            = tag,
+                text               = text,
+                ref_codes          = ref_codes,
+                reference_start_id = reference_start_id if ref_codes is not None else None,
+                reference_end_id   = reference_end_id   if ref_codes is not None else None,
+                tag                = tag,
             ))
             logger.info(f"Log sample {local_idx}: '{text[:60]}'")
         return samples
@@ -400,8 +398,8 @@ class Trainer:
                     min_audio_frames=20,
                     temperature=0.8, top_k=50, top_p=0.9,
                     ref_codes=sample["ref_codes"],
-                    audio_start_id=sample["audio_start_id"],
-                    audio_end_id=sample["audio_end_id"],
+                    reference_start_id=sample["reference_start_id"],
+                    reference_end_id=sample["reference_end_id"],
                 )  # [k, n_frames]
 
                 if codes.shape[1] == 0:

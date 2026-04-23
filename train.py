@@ -33,22 +33,21 @@ def main():
     print("=" * 60)
 
     # Tokenizer + audio special tokens
-    # <|audio_sep|>:   text→audio boundary
-    # <|audio_eos|>:   bookkeeping only; EOS signalled by cb0 head predicting index 2048
-    # <|audio_start|>: opens reference audio block (multi-speaker)
-    # <|audio_end|>:   closes reference audio block (multi-speaker)
+    # <|audio_start|>:     text → target-audio boundary (start of generated audio)
+    # <|reference_start|>: opens speaker-reference block (multi-speaker)
+    # <|reference_end|>:   closes speaker-reference block
+    # (End of generation is signalled by cb0 head predicting index 2048 = AUDIO_EOS.)
     tokenizer = AutoTokenizer.from_pretrained(cfg.llm_name)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.add_special_tokens({
         "additional_special_tokens": [
-            "<|audio_sep|>", "<|audio_eos|>",
-            "<|audio_start|>", "<|audio_end|>",
+            "<|audio_start|>", "<|reference_start|>", "<|reference_end|>",
         ]
     })
-    audio_sep_id   = tokenizer.convert_tokens_to_ids("<|audio_sep|>")
-    audio_start_id = tokenizer.convert_tokens_to_ids("<|audio_start|>")
-    audio_end_id   = tokenizer.convert_tokens_to_ids("<|audio_end|>")
+    audio_start_id     = tokenizer.convert_tokens_to_ids("<|audio_start|>")
+    reference_start_id = tokenizer.convert_tokens_to_ids("<|reference_start|>")
+    reference_end_id   = tokenizer.convert_tokens_to_ids("<|reference_end|>")
 
     # Model
     model = TTSModel(cfg, tokenizer)
@@ -66,12 +65,12 @@ def main():
 
     # Dataloaders
     train_loader = get_dataloader(
-        "train", tokenizer, audio_sep_id, cfg, shuffle=True,
-        audio_start_id=audio_start_id, audio_end_id=audio_end_id,
+        "train", tokenizer, audio_start_id, cfg, shuffle=True,
+        reference_start_id=reference_start_id, reference_end_id=reference_end_id,
     )
     val_loader = get_dataloader(
-        "val", tokenizer, audio_sep_id, cfg, shuffle=False,
-        audio_start_id=audio_start_id, audio_end_id=audio_end_id,
+        "val", tokenizer, audio_start_id, cfg, shuffle=False,
+        reference_start_id=reference_start_id, reference_end_id=reference_end_id,
     )
 
     print(f"Train examples: {len(train_loader.dataset)}")

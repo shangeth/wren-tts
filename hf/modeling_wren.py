@@ -3,8 +3,20 @@ Wren-TTS model — a transformers-compatible wrapper over SmolLM2 + Mimi codeboo
 
 Designed for use with `AutoModel.from_pretrained(..., trust_remote_code=True)`.
 Self-contained: no imports from a `src/` folder.
+
+Two sequence layouts are supported, dispatched by `config.pattern`:
+
+  "delay" (new, default for fresh models):
+    At each audio step s the model sees the sum of k per-codebook input embeddings
+    and predicts k tokens via k parallel heads. Codebook q at frame f lives at
+    step s = f + q (MusicGen-style delay).
+
+  "flat" (legacy for v1 models on the Hub):
+    Audio tokens are interleaved cb0_f0, cb1_f0, ..., cb0_f1, ...; the model sees
+    one code per step and the head is selected by position % k.
 """
 
+import math
 from typing import Optional
 
 import torch
@@ -18,15 +30,6 @@ except ImportError:
 
 
 class WrenForTTS(PreTrainedModel):
-    """
-    SmolLM2 backbone + k separate audio-code embedding tables + k audio heads.
-
-    Sequence layout fed to the LLM (via inputs_embeds):
-      [ text tokens... | <audio_sep> | cb0_f0 | cb1_f0 | ... | cbk_f0 | cb0_f1 | ... ]
-
-    cb0's head has an extra output class `AUDIO_EOS = codebook_size` used as stop token.
-    """
-
     config_class      = WrenConfig
     base_model_prefix = "wren"
 
@@ -34,18 +37,23 @@ class WrenForTTS(PreTrainedModel):
         super().__init__(config)
         self.k          = config.k_codebooks
         self.AUDIO_EOS  = config.codebook_size
+        self.AUDIO_PAD  = config.codebook_size
+        self.pattern    = getattr(config, "pattern", "flat")
 
         # Build backbone from its config only. Pretrained weights for the backbone
         # are included in our own state_dict, so no need to re-download here.
-        # Set vocab_size directly on the sub-config to avoid a subsequent
-        # resize_token_embeddings call (which breaks under meta-tensor init).
         llm_cfg            = AutoConfig.from_pretrained(config.llm_name)
         llm_cfg.vocab_size = config.vocab_size
         self.llm           = AutoModelForCausalLM.from_config(llm_cfg)
 
         hidden = self.llm.config.hidden_size
+
+        # Input-embedding tables:
+        #   delay: size codebook_size + 1 (extra row = PAD at index codebook_size)
+        #   flat:  size codebook_size     (no PAD — legacy v1 shape)
+        embed_size = config.codebook_size + (1 if self.pattern == "delay" else 0)
         self.audio_embeds = nn.ModuleList([
-            nn.Embedding(config.codebook_size, hidden)
+            nn.Embedding(embed_size, hidden)
             for _ in range(self.k)
         ])
         self.audio_heads = nn.ModuleList([
@@ -53,6 +61,7 @@ class WrenForTTS(PreTrainedModel):
             for i in range(self.k)
         ])
 
+        self.embed_scale = 1.0 / math.sqrt(self.k) if self.pattern == "delay" else 1.0
         self._mimi = None  # lazy-loaded on first use
 
     # --- Mimi codec (lazy-loaded, decoder + encoder used for audio I/O) ---
@@ -92,7 +101,7 @@ class WrenForTTS(PreTrainedModel):
         out     = self.mimi.decode(codes_b)
         return out.audio_values[0].cpu()
 
-    # --- Generation ---
+    # --- Generation: dispatches on self.pattern ---
 
     @torch.no_grad()
     def generate(
@@ -112,13 +121,43 @@ class WrenForTTS(PreTrainedModel):
         Generate Mimi codes (or waveform) from a tokenized prompt.
 
         Args:
-            input_ids:        [1, L] — text tokens ending with <|audio_sep|>, as produced by WrenProcessor.
+            input_ids:        [1, L] — text tokens ending with <|audio_start|> (delay)
+                              or <|audio_sep|> (flat legacy), as produced by WrenProcessor.
             ref_codes:        optional [k, T_ref] reference codes for voice cloning.
             max_audio_frames: hard cap on output length.
-            min_audio_frames: suppress EOS for this many frames (prevents trivially-short outputs).
-            eos_bias:         additive bias on AUDIO_EOS logit; raise (e.g. 2–6) to reduce hallucinated continuations.
+            min_audio_frames: suppress EOS for this many frames.
+            eos_bias:         additive bias on AUDIO_EOS logit; raise (2–6) to reduce tail hallucination.
             output_audio:     if True, return [1, T] waveform; else return [k, n_frames] codes.
         """
+        if self.pattern == "delay":
+            codes = self._generate_delay(
+                input_ids, ref_codes, max_audio_frames, min_audio_frames,
+                temperature, top_k, top_p, eos_bias,
+            )
+        else:
+            codes = self._generate_flat(
+                input_ids, ref_codes, max_audio_frames, min_audio_frames,
+                temperature, top_k, top_p, eos_bias,
+            )
+
+        if output_audio:
+            return self.decode_audio(codes)
+        return codes
+
+    # --- Delay generation (new pattern) ---
+
+    def _audio_embed_step(self, codes_step: torch.LongTensor) -> torch.Tensor:
+        """Summed per-codebook embedding for one audio step. codes_step: [1, k]. Returns [1, 1, H]."""
+        acc = self.audio_embeds[0](codes_step[:, 0:1])
+        for q in range(1, self.k):
+            acc = acc + self.audio_embeds[q](codes_step[:, q:q + 1])
+        return acc * self.embed_scale
+
+    def _generate_delay(
+        self,
+        input_ids, ref_codes, max_audio_frames, min_audio_frames,
+        temperature, top_k, top_p, eos_bias,
+    ) -> torch.LongTensor:
         device = next(self.parameters()).device
         self.eval()
 
@@ -128,12 +167,118 @@ class WrenForTTS(PreTrainedModel):
 
         prompt_embeds_list = []
 
-        # Optional reference-audio block (voice cloning)
+        # Reference block (delay-layout): <reference_start> ref_delayed <reference_end>
         if ref_codes is not None:
-            if self.config.audio_start_id is None or self.config.audio_end_id is None:
+            ref_start_id = getattr(self.config, "reference_start_id", None)
+            ref_end_id   = getattr(self.config, "reference_end_id", None)
+            if ref_start_id is None or ref_end_id is None:
+                raise ValueError("reference_start_id/reference_end_id missing from config; cannot use ref_codes")
+            ref_codes = ref_codes.to(device)
+
+            start_t = torch.tensor([[ref_start_id]], dtype=torch.long, device=device)
+            prompt_embeds_list.append(embed_tokens(start_t.clamp(0, text_vocab - 1)))
+
+            # Apply delay to ref: [k, T_ref] -> [k, T_ref + k - 1]
+            T_ref = ref_codes.shape[1]
+            L_ref = T_ref + self.k - 1
+            ref_delayed = torch.full((self.k, L_ref), self.AUDIO_PAD, dtype=torch.long, device=device)
+            for q in range(self.k):
+                ref_delayed[q, q:q + T_ref] = ref_codes[q]
+
+            for s in range(L_ref):
+                codes_step = ref_delayed[:, s:s + 1].T.contiguous()  # [1, k]
+                prompt_embeds_list.append(self._audio_embed_step(codes_step))
+
+            end_t = torch.tensor([[ref_end_id]], dtype=torch.long, device=device)
+            prompt_embeds_list.append(embed_tokens(end_t.clamp(0, text_vocab - 1)))
+
+        # Text prompt — already terminated by <|audio_start|> via the processor
+        ids = input_ids.to(device)
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        prompt_embeds_list.append(embed_tokens(ids.clamp(0, text_vocab - 1)))
+
+        prompt_embeds = torch.cat(prompt_embeds_list, dim=1).to(llm_dtype)
+        out     = self.llm.model(inputs_embeds=prompt_embeds, use_cache=True)
+        hidden  = out.last_hidden_state
+        past_kv = out.past_key_values
+
+        outputs: list = [[] for _ in range(self.k)]
+        eos_step: Optional[int] = None
+        max_steps = max_audio_frames + self.k - 1
+
+        for step in range(max_steps):
+            h = hidden[:, -1:, :]
+            logits_per_cb = [self.audio_heads[q](h.float()).squeeze(1) for q in range(self.k)]
+
+            # EOS bias / min-frames suppression on cb0
+            logits_per_cb[0][:, self.AUDIO_EOS] = logits_per_cb[0][:, self.AUDIO_EOS] + eos_bias
+            if step < min_audio_frames:
+                logits_per_cb[0][:, self.AUDIO_EOS] = float("-inf")
+
+            next_codes = torch.empty(self.k, dtype=torch.long, device=device)
+            for q in range(self.k):
+                if step < q:
+                    next_codes[q] = self.AUDIO_PAD
+                    continue
+                if q == 0 and eos_step is not None:
+                    next_codes[q] = self.AUDIO_PAD
+                    continue
+                if q > 0 and eos_step is not None and (step - q) >= eos_step:
+                    next_codes[q] = self.AUDIO_PAD
+                    continue
+                sampled = _sample(logits_per_cb[q], temperature, top_k, top_p)
+                if q == 0 and sampled.item() == self.AUDIO_EOS:
+                    eos_step = step
+                    next_codes[q] = self.AUDIO_PAD
+                else:
+                    next_codes[q] = sampled
+
+            for q in range(self.k):
+                outputs[q].append(next_codes[q].item())
+
+            if eos_step is not None and step >= eos_step + self.k - 1:
+                break
+
+            next_embed = self._audio_embed_step(next_codes.unsqueeze(0)).to(hidden.dtype)
+            out     = self.llm.model(inputs_embeds=next_embed, past_key_values=past_kv, use_cache=True)
+            hidden  = out.last_hidden_state
+            past_kv = out.past_key_values
+
+        T = eos_step if eos_step is not None else max_audio_frames
+        max_available = min(len(outputs[q]) - q for q in range(self.k))
+        T = min(T, max_available)
+        if T <= 0:
+            return torch.zeros(self.k, 0, dtype=torch.long)
+        codes = torch.empty(self.k, T, dtype=torch.long)
+        for q in range(self.k):
+            codes[q] = torch.tensor(outputs[q][q:q + T], dtype=torch.long)
+        return codes
+
+    # --- Flat generation (legacy v1 compatibility) ---
+
+    def _generate_flat(
+        self,
+        input_ids, ref_codes, max_audio_frames, min_audio_frames,
+        temperature, top_k, top_p, eos_bias,
+    ) -> torch.LongTensor:
+        device = next(self.parameters()).device
+        self.eval()
+
+        embed_tokens = self.llm.get_input_embeddings()
+        text_vocab   = self.llm.config.vocab_size
+        llm_dtype    = next(self.llm.parameters()).dtype
+
+        prompt_embeds_list = []
+
+        # Under "flat", legacy field names apply: audio_start_id == ref-start, audio_end_id == ref-end.
+        if ref_codes is not None:
+            legacy_start = getattr(self.config, "audio_start_id", None)
+            legacy_end   = getattr(self.config, "audio_end_id",   None)
+            if legacy_start is None or legacy_end is None:
                 raise ValueError("audio_start_id/audio_end_id missing from config; cannot use ref_codes")
             ref_codes = ref_codes.to(device)
-            start_t = torch.tensor([[self.config.audio_start_id]], dtype=torch.long, device=device)
+            start_t = torch.tensor([[legacy_start]], dtype=torch.long, device=device)
             prompt_embeds_list.append(embed_tokens(start_t.clamp(0, text_vocab - 1)))
 
             ref_tokens = ref_codes.T.reshape(-1)  # interleaved [T_ref * k]
@@ -142,10 +287,9 @@ class WrenForTTS(PreTrainedModel):
                 idx    = code.clamp(0, self.config.codebook_size - 1).unsqueeze(0)
                 prompt_embeds_list.append(self.audio_embeds[cb_idx](idx).unsqueeze(0))
 
-            end_t = torch.tensor([[self.config.audio_end_id]], dtype=torch.long, device=device)
+            end_t = torch.tensor([[legacy_end]], dtype=torch.long, device=device)
             prompt_embeds_list.append(embed_tokens(end_t.clamp(0, text_vocab - 1)))
 
-        # Text prompt — already terminated by <|audio_sep|> via the processor
         ids = input_ids.to(device)
         if ids.dim() == 1:
             ids = ids.unsqueeze(0)
@@ -185,13 +329,9 @@ class WrenForTTS(PreTrainedModel):
 
         complete = (len(all_codes) // self.k) * self.k
         if complete == 0:
-            codes = torch.zeros(self.k, 0, dtype=torch.long)
-        else:
-            codes = torch.tensor(all_codes[:complete], dtype=torch.long)
-            codes = codes.reshape(complete // self.k, self.k).T  # [k, n_frames]
-
-        if output_audio:
-            return self.decode_audio(codes)
+            return torch.zeros(self.k, 0, dtype=torch.long)
+        codes = torch.tensor(all_codes[:complete], dtype=torch.long)
+        codes = codes.reshape(complete // self.k, self.k).T  # [k, n_frames]
         return codes
 
 
