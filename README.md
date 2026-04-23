@@ -240,8 +240,16 @@ python hf/push.py \
 
 ## Citation
 
-If you use Wren, please also cite: **SmolLM2** (HuggingFace, 2024), **Mimi**
-(Défossez et al., *Moshi*, Kyutai 2024), and the corpora you train on.
+```bibtex
+@misc{wren2026,
+  title  = {Wren: A Family of Small Open-Weight Models for Unified Speech-Text Modelling},
+  author = {Shangeth Rajaa},
+  year   = {2026},
+  url    = {https://github.com/shangeth/wren}
+}
+```
+
+Please also cite the training corpora you use (LJSpeech, LibriSpeech, etc.).
 
 ## License
 
