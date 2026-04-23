@@ -1,0 +1,21 @@
+# Core
+torch>=2.1
+torchaudio>=2.1
+transformers>=4.45
+huggingface_hub>=0.25
+datasets>=3.0              # for --data_source hf
+pyyaml
+tqdm
+
+# Logging (pick one; tensorboard is the default in config.py)
+tensorboard
+# wandb
+
+# Evaluation (evaluate.py + metrics.py)
+# Whisper comes via `transformers`; these add WER/CER + EER + UTMOS.
+jiwer                        # WER / CER
+scikit-learn                 # EER (ROC curve)
+# UTMOS loads via torch.hub from tarepan/SpeechMOS — no pip needed.
+
+# Optional: LoRA fine-tuning (cfg.use_lora)
+# peft>=0.11

@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+venv/
+env/
+.venv/
+
+# Data + codec caches (huge; hosted on HuggingFace)
+data/
+mimi_cache/
+librispeech_mimi_cache/
+
+# Training outputs
+checkpoints/
+checkpoints-*/
+runs/
+wandb/
+inference_out/
+*.ckpt
+
+# HF staging
+staged/
+staged_*/
+
+# Weights
+*.pt
+*.bin
+*.safetensors
+
+# Logs
+*.log
+nohup.out
+
+# Secrets / env files
+.env
+.env.*
+secrets*
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+.claude/

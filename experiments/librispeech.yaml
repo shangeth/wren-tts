@@ -1,0 +1,11 @@
+# Matches the v1 training recipe (Wren-TTS-360M-v1):
+#   - SmolLM2-360M backbone
+#   - LibriSpeech train-clean-{100,360} (~460 h, multi-speaker)
+#   - k=3 Mimi codebooks, same-speaker reference block, lowercased transcripts
+#
+# All of the above are Config defaults — so this file only needs to override the
+# per-run output paths and logging name.
+
+checkpoint_dir: checkpoints/librispeech
+log_dir:        runs/librispeech
+wandb_run_name: librispeech-v1

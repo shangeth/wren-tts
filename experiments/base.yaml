@@ -1,0 +1,49 @@
+batch_size: 8
+betas:
+- 0.9
+- 0.95
+cb_loss_weights:
+- 1.0
+- 0.5
+- 0.5
+checkpoint_dir: checkpoints
+codebook_size: 2048
+compile_model: false
+device: cuda
+epochs: 50
+grad_accum_steps: 4
+grad_clip: 1.0
+hf_dataset: shangeth/librispeech-mimi-codes
+hf_splits:
+- train_clean_100
+- train_clean_360
+k_codebooks: 3
+keep_last_n: 3
+llm_name: HuggingFaceTB/SmolLM2-360M
+log_audio_every: 200
+log_dir: runs
+logger: tensorboard
+lora_alpha: 32
+lora_r: 16
+lora_target_modules:
+- q_proj
+- v_proj
+lowercase_text: true
+lr: 0.0001
+lr_decay_steps: 20000
+lr_warmup_steps: 500
+max_audio_frames: 300
+max_ref_frames: 150
+max_text_tokens: 200
+mimi_model_name: kyutai/mimi
+multispeaker: true
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+resume_from: null
+use_amp: true
+use_lora: false
+val_fraction: 0.01
+wandb_project: tts
+wandb_run_name: null
+weight_decay: 0.01
