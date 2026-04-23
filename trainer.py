@@ -150,8 +150,8 @@ class Trainer:
             train_losses = self._train_epoch(epoch)
             val_losses   = self._val_epoch(epoch)
 
-            self._log(train_losses, epoch, prefix="epoch/train")
-            self._log(val_losses,   epoch, prefix="epoch/val")
+            self._log(train_losses, self.global_step, prefix="epoch/train")
+            self._log(val_losses,   self.global_step, prefix="epoch/val")
 
             self._log_audio_samples(self.global_step)
 

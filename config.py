@@ -41,7 +41,7 @@ class Config:
     max_text_tokens:       int       = 200
     max_audio_frames:      int       = 300    # 10 s at 12.5 fps
     max_ref_frames:        int       = 150
-    batch_size:            int       = 8
+    batch_size:            int       = 4
     grad_accum_steps:      int       = 4      # effective batch = 32
     num_workers:           int       = 4
     pin_memory:            bool      = True
@@ -72,7 +72,7 @@ class Config:
     # --- Logging ---
     logger:                Optional[str] = "tensorboard"   # "tensorboard" | "wandb" | null
     log_dir:               str   = "runs"
-    log_audio_every:       int   = 200
+    log_audio_every:       int   = 1000
     wandb_project:         str   = "tts"
     wandb_run_name:        Optional[str] = None
 
