@@ -152,12 +152,21 @@ open weights, simple PyTorch checkpoints, reproducible training recipes.
 
 ## Citation
 
-If you use this checkpoint, please also cite the underlying components:
+```bibtex
+@misc{wren2026,
+  title  = {Wren: A Family of Small Open-Weight Models for Unified Speech-Text Modelling},
+  author = {Shangeth Rajaa},
+  year   = {2026},
+  url    = {https://github.com/shangeth/wren}
+}
 
-- **SmolLM2** — Hugging Face SmolLM team, 2024
-- **Mimi codec** — Défossez et al., *Moshi*, Kyutai 2024
-- **LJSpeech** — K. Ito, 2017
-- **LibriSpeech** — Panayotov et al., ICASSP 2015
+@inproceedings{panayotov2015librispeech,
+  title     = {Librispeech: an ASR corpus based on public domain audio books},
+  author    = {Panayotov, Vassil and Chen, Guoguo and Povey, Daniel and Khudanpur, Sanjeev},
+  booktitle = {ICASSP},
+  year      = {2015}
+}
+```
 
 ## License
 
