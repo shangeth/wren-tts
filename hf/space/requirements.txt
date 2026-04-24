@@ -1,0 +1,5 @@
+gradio>=4.44
+torch
+torchaudio
+transformers>=4.40
+numpy
