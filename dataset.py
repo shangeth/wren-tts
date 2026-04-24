@@ -269,48 +269,91 @@ class HFMimiDataset(Dataset):
         )
 
 
+_CANONICAL_COLUMNS = {"id", "text", "speaker_id", "codes", "n_frames", "k_codebooks"}
+
+
+def _normalize_schema(ds, repo_id: str):
+    """
+    Make a heterogeneous mix of mimi-codes datasets concat-compatible:
+      - Single-speaker sets (ljspeech, jenny) have no `speaker_id` — add one
+        constant tag (= dataset name) so concat schemas line up and the multispeaker
+        ref-picker treats them as one speaker.
+      - Cast `speaker_id` to string — VCTK/LibriTTS store it as int32, single-speaker
+        synthetic tags are strings; concat needs the column type to match.
+      - Drop any columns outside the canonical schema (e.g. VCTK's `accent`).
+    """
+    from datasets import Value
+    if "speaker_id" not in ds.column_names:
+        tag = repo_id.split("/")[-1].replace("-mimi-codes", "")
+        ds = ds.add_column("speaker_id", [tag] * len(ds))
+        logger.info(f"  {repo_id}: added synthetic speaker_id={tag!r} (single-speaker set)")
+    if ds.features["speaker_id"].dtype != "string":
+        ds = ds.cast_column("speaker_id", Value("string"))
+    extra = [c for c in ds.column_names if c not in _CANONICAL_COLUMNS]
+    if extra:
+        ds = ds.remove_columns(extra)
+        logger.info(f"  {repo_id}: dropped columns {extra}")
+    return ds
+
+
 def _load_hf_split(
     split: str,
     cfg:   Config,
 ):
     """Load and combine all datasets from cfg.hf_datasets, return the train|val partition.
 
-    Each entry in hf_datasets/hf_splits/hf_weights is one dataset source:
-      - hf_splits[i]  : comma-sep HF split names (concatenated within the same repo)
-      - hf_weights[i] : fraction in (0, 1] — 1.0 = full dataset, 0.2 = 20% (fixed at load time)
+    Per-dataset config (parallel lists, indexed by i):
+      - hf_splits[i]   : comma-sep HF split names (concatenated within the same repo)
+      - hf_weights[i]  : fraction in (0, 1].
+                         1.0 → use every row every epoch.
+                         <1.0 → per-epoch stratified-by-speaker subsample of that fraction
+                                (different rows seen each epoch; many speakers ≈ stratified,
+                                 single speaker ≈ random row-level subsample).
+
+    Subsampling is NOT applied here — it happens per-epoch via EpochStratifiedSampler
+    in get_dataloader. We return the full combined dataset plus per-source row ranges.
+
+    Returns:
+        combined:    HuggingFace Dataset with all rows from all sources concatenated
+        source_meta: list of (start_row, end_row, weight) per source (in concat order)
     """
     from datasets import load_dataset, concatenate_datasets
 
-    # Pad hf_weights to len(hf_datasets) in case user omits trailing 1.0s
-    weights = list(cfg.hf_weights) + [1.0] * max(0, len(cfg.hf_datasets) - len(cfg.hf_weights))
+    n_ds = len(cfg.hf_datasets)
+    weights = list(cfg.hf_weights) + [1.0] * max(0, n_ds - len(cfg.hf_weights))
 
-    sources = []
+    loaded = []
     for repo, splits_str, weight in zip(cfg.hf_datasets, cfg.hf_splits, weights):
         split_names = [s.strip() for s in splits_str.split(",")]
         parts = [load_dataset(repo, split=s) for s in split_names]
         ds    = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
+        ds    = _normalize_schema(ds, repo)
+        loaded.append((repo, splits_str, ds, weight))
+        logger.info(f"  {repo} [{splits_str}]: {len(ds)} rows  (weight={weight})")
 
-        if weight < 1.0:
-            n = max(1, int(len(ds) * weight))
-            ds = ds.shuffle(seed=42).select(range(n))
-            logger.info(f"  {repo} [{splits_str}]: using {n}/{len(ds)} rows (weight={weight})")
-        else:
-            logger.info(f"  {repo} [{splits_str}]: using all {len(ds)} rows")
-
-        sources.append(ds)
-
-    combined = concatenate_datasets(sources) if len(sources) > 1 else sources[0]
+    combined    = concatenate_datasets([d for _, _, d, _ in loaded]) if len(loaded) > 1 else loaded[0][2]
+    source_meta = []
+    cursor = 0
+    for _, _, d, w in loaded:
+        source_meta.append((cursor, cursor + len(d), w))
+        cursor += len(d)
 
     use_explicit_val = bool(cfg.hf_val_datasets)
 
     if split == "train":
         if use_explicit_val:
-            # Explicit val datasets defined — train gets all its data.
-            return combined
-        # Fallback: carve val_fraction off the tail.
+            return combined, source_meta
+        # Fallback: carve val_fraction off the tail of combined train data.
         n = len(combined)
         n_val = max(1, int(n * cfg.val_fraction))
-        return combined.select(range(n - n_val))
+        train_ds = combined.select(range(n - n_val))
+        # Truncate source_meta to the train range (drop any sources beyond train cutoff).
+        truncated_meta = []
+        for s, e, w in source_meta:
+            if s >= n - n_val:
+                break
+            truncated_meta.append((s, min(e, n - n_val), w))
+        return train_ds, truncated_meta
 
     if split == "val":
         if use_explicit_val:
@@ -318,15 +361,111 @@ def _load_hf_split(
             for repo, splits_str in zip(cfg.hf_val_datasets, cfg.hf_val_splits):
                 split_names = [s.strip() for s in splits_str.split(",")]
                 parts = [load_dataset(repo, split=s) for s in split_names]
-                val_parts.append(concatenate_datasets(parts) if len(parts) > 1 else parts[0])
-                logger.info(f"  val: {repo} [{splits_str}]: {val_parts[-1].num_rows} rows")
-            return concatenate_datasets(val_parts) if len(val_parts) > 1 else val_parts[0]
+                val_ds = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
+                val_ds = _normalize_schema(val_ds, repo)
+                val_parts.append(val_ds)
+                logger.info(f"  val: {repo} [{splits_str}]: {val_ds.num_rows} rows")
+            val_combined = concatenate_datasets(val_parts) if len(val_parts) > 1 else val_parts[0]
+            # Val never subsamples — single "source" with weight 1.0
+            return val_combined, [(0, len(val_combined), 1.0)]
         # Fallback: tail fraction of combined train data.
         n = len(combined)
         n_val = max(1, int(n * cfg.val_fraction))
-        return combined.select(range(n - n_val, n))
+        val_ds = combined.select(range(n - n_val, n))
+        return val_ds, [(0, len(val_ds), 1.0)]
 
     raise ValueError(f"Unknown split: {split!r}")
+
+
+# ----------------------------------------------------------------------
+# Per-epoch stratified sampler
+# ----------------------------------------------------------------------
+
+class EpochStratifiedSampler(torch.utils.data.Sampler):
+    """
+    Multi-source, per-epoch stratified-by-speaker sampler.
+
+    For each source in `source_meta`, picks `weight` fraction of rows with stratification
+    by `speaker_id` (≥1 row per speaker, picked fresh each epoch). Sources with weight=1.0
+    contribute every row each epoch.
+
+    Indices yielded are LOCAL to the dataset (`HFMimiDataset`) — i.e. into `dataset.indices`.
+    """
+    def __init__(
+        self,
+        dataset:        "HFMimiDataset",
+        source_meta:    List,            # list of (start_row, end_row, weight)
+        shuffle:        bool = True,
+        base_seed:      int  = 0,
+    ):
+        self.dataset    = dataset
+        self.shuffle    = shuffle
+        self.base_seed  = base_seed
+        self.epoch      = 0
+
+        # Build per-source, per-speaker LOCAL-index mapping.
+        # local_idx i ↔ raw row dataset.indices[i]; we need source assignment + speaker for that row.
+        # `dataset.ds["speaker_id"]` reads the column for ALL raw rows once (fast for our sizes).
+        speaker_col = dataset.ds["speaker_id"]
+        source_of_row = [None] * (max(end for _, end, _ in source_meta) if source_meta else 0)
+        for src_i, (s, e, _) in enumerate(source_meta):
+            for r in range(s, e):
+                source_of_row[r] = src_i
+
+        # per_source_buckets[src_i] = {speaker_id: [local_idx, local_idx, ...]}
+        self.per_source_buckets: List[dict] = [dict() for _ in source_meta]
+        self.weights: List[float] = [w for _, _, w in source_meta]
+
+        for local_idx, raw_row in enumerate(dataset.indices):
+            src_i = source_of_row[raw_row]
+            if src_i is None:
+                continue  # row not in any tracked source (shouldn't happen)
+            sp = speaker_col[raw_row]
+            self.per_source_buckets[src_i].setdefault(sp, []).append(local_idx)
+
+        # Approximate length once (per-epoch length will fluctuate by ±1 per speaker due to rounding).
+        self._length = sum(self._target_per_source(i) for i in range(len(source_meta)))
+
+        # Log mix summary
+        for src_i, (s, e, w) in enumerate(source_meta):
+            n_kept = sum(len(v) for v in self.per_source_buckets[src_i].values())
+            n_speakers = len(self.per_source_buckets[src_i])
+            target = self._target_per_source(src_i)
+            tag = "all" if w >= 1.0 else f"{w:.0%}/spk"
+            logger.info(f"  sampler src{src_i}: rows[{s}:{e}] kept={n_kept} speakers={n_speakers} "
+                        f"target={target}/epoch ({tag})")
+
+    def _target_per_source(self, src_i: int) -> int:
+        w = self.weights[src_i]
+        buckets = self.per_source_buckets[src_i]
+        if w >= 1.0:
+            return sum(len(v) for v in buckets.values())
+        return sum(max(1, int(round(len(v) * w))) for v in buckets.values())
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self):
+        rng = random.Random(self.base_seed * 100003 + self.epoch)
+        all_indices: list = []
+        for src_i, w in enumerate(self.weights):
+            buckets = self.per_source_buckets[src_i]
+            if w >= 1.0:
+                for v in buckets.values():
+                    all_indices.extend(v)
+            else:
+                for v in buckets.values():
+                    n = max(1, int(round(len(v) * w)))
+                    if n >= len(v):
+                        all_indices.extend(v)
+                    else:
+                        all_indices.extend(rng.sample(v, n))
+        if self.shuffle:
+            rng.shuffle(all_indices)
+        return iter(all_indices)
+
+    def __len__(self):
+        return self._length
 
 
 def make_collate_fn(codebook_size: int):
@@ -380,8 +519,13 @@ def get_dataloader(
     shuffle:            bool = True,
     reference_start_id: Optional[int] = None,
     reference_end_id:   Optional[int] = None,
-) -> DataLoader:
-    hf_ds = _load_hf_split(split, cfg)
+):
+    """
+    Returns (dataloader, sampler_or_None). The sampler is non-None when any source has
+    weight<1.0 — in that case the trainer should call sampler.set_epoch(e) at the start
+    of each epoch to refresh the per-epoch stratified subsample.
+    """
+    hf_ds, source_meta = _load_hf_split(split, cfg)
     dataset = HFMimiDataset(
         hf_ds,
         tokenizer          = tokenizer,
@@ -390,7 +534,23 @@ def get_dataloader(
         reference_start_id = reference_start_id,
         reference_end_id   = reference_end_id,
     )
-    return DataLoader(
+
+    needs_sampler = any(w < 1.0 for _, _, w in source_meta)
+    if needs_sampler:
+        sampler = EpochStratifiedSampler(dataset, source_meta, shuffle=shuffle)
+        loader = DataLoader(
+            dataset,
+            batch_size         = cfg.batch_size,
+            sampler            = sampler,
+            num_workers        = cfg.num_workers,
+            pin_memory         = cfg.pin_memory,
+            prefetch_factor    = cfg.prefetch_factor if cfg.num_workers > 0 else None,
+            persistent_workers = cfg.num_workers > 0,
+            collate_fn         = make_collate_fn(cfg.codebook_size),
+        )
+        return loader, sampler
+
+    loader = DataLoader(
         dataset,
         batch_size         = cfg.batch_size,
         shuffle            = shuffle,
@@ -400,6 +560,7 @@ def get_dataloader(
         persistent_workers = cfg.num_workers > 0,
         collate_fn         = make_collate_fn(cfg.codebook_size),
     )
+    return loader, None
 
 
 if __name__ == "__main__":
@@ -419,7 +580,7 @@ if __name__ == "__main__":
     reference_start_id = tokenizer.convert_tokens_to_ids("<|reference_start|>")
     reference_end_id   = tokenizer.convert_tokens_to_ids("<|reference_end|>")
 
-    loader = get_dataloader(
+    loader, _sampler = get_dataloader(
         "train", tokenizer, audio_start_id, cfg, shuffle=False,
         reference_start_id=reference_start_id, reference_end_id=reference_end_id,
     )

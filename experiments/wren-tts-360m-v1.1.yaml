@@ -1,0 +1,66 @@
+# Wren-TTS-360M v1.1 — fine-tune from v1 with broader speaker/accent coverage.
+#
+# Data mix:
+#   - VCTK             100% every epoch  (109 speakers, multiple accents)
+#   - Jenny            100% every epoch  (single high-quality voice)
+#   - LibriTTS-R        10% per epoch    (per-speaker stratified, resampled each epoch)
+#   - LJSpeech          10% per epoch    (single speaker; 10% random)
+#
+# Resamples-per-epoch for the 10%-weighted sets means cumulative coverage grows over
+# the run (~65% of LibriTTS rows seen by epoch 10, ~88% by epoch 20).
+
+hf_datasets:
+  - shangeth/vctk-mimi-codes
+  - shangeth/jenny-mimi-codes
+  - shangeth/libritts-r-mimi-codes
+  - shangeth/ljspeech-mimi-codes
+
+hf_splits:
+  - train
+  - train
+  - train_clean_100,train_clean_360,train_other_500
+  - train
+
+hf_weights: [1.0, 1.0, 0.1, 0.1]
+
+hf_val_datasets: [shangeth/libritts-r-mimi-codes]
+hf_val_splits:   [dev_clean]
+
+# --- Architecture (must match v1 checkpoint to load) ---
+k_codebooks: 8
+
+# Uniform per-codebook weights for fine-tune — v1 was trained with cb0=2.0 which
+# over-emphasized the semantic codebook (cb0 was first to overfit). Equal weighting
+# gives more relative gradient to the under-trained finer codebooks (cb4–cb7).
+cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+multispeaker:    true
+eos_loss_weight: 50.0
+
+# --- Batch sizing (A100-40GB; same as v1) ---
+batch_size:       16
+grad_accum_steps: 2
+
+# --- Fine-tune from v1 best checkpoint ---
+# resume_from + reset_optimizer=true → loads model weights only;
+# optimizer/scheduler/step counter all start fresh on the new schedule below.
+resume_from:     checkpoints/v1-c8-delay/best.pt
+reset_optimizer: true
+
+# Lower peak LR (1/3 of v1's 1e-4) — typical for fine-tune.
+# Short warmup since the model is already trained.
+# ~104k filtered rows × bs=32 ≈ ~3.2k opt-steps/epoch × 8 epochs ≈ ~25k total steps.
+lr:              3.0e-5
+weight_decay:    0.01
+lr_warmup_steps: 200
+lr_decay_steps:  5000   # floor; trainer auto-extends to total steps if larger
+epochs:          10
+
+# Log audio more often early — finetune behavior changes fast.
+log_audio_every: 500
+
+checkpoint_dir:  checkpoints/v1.1
+log_dir:         runs/v1.1
+logger:          wandb
+wandb_project:   wren
+wandb_run_name:  wren-tts-360m-v1.1

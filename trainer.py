@@ -71,14 +71,16 @@ class Trainer:
         test_loader=None,
         tokenizer=None,
         mimi_codec=None,
+        train_sampler=None,
     ):
-        self.model        = model
-        self.train_loader = train_loader
-        self.val_loader   = val_loader
-        self.test_loader  = test_loader
-        self.config       = config
-        self.tokenizer    = tokenizer
-        self.mimi_codec   = mimi_codec
+        self.model         = model
+        self.train_loader  = train_loader
+        self.val_loader    = val_loader
+        self.test_loader   = test_loader
+        self.config        = config
+        self.tokenizer     = tokenizer
+        self.mimi_codec    = mimi_codec
+        self.train_sampler = train_sampler  # EpochStratifiedSampler or None
 
         self.device = torch.device(config.device)
         self.model.to(self.device)
@@ -180,6 +182,11 @@ class Trainer:
     def load_checkpoint(self, path: str):
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model"])
+        if getattr(self.config, "reset_optimizer", False):
+            # Fine-tune mode: weights only. Keep fresh optimizer/scheduler/step/epoch.
+            logger.info(f"Loaded weights from {path} (epoch {ckpt['epoch']}); "
+                        f"optimizer/scheduler/step reset for fine-tune.")
+            return
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scheduler.load_state_dict(ckpt["scheduler"])
         self.scaler.load_state_dict(ckpt["scaler"])
@@ -194,6 +201,9 @@ class Trainer:
 
     def _train_epoch(self, epoch: int) -> dict:
         self.model.train()
+        # Refresh the per-epoch stratified subsample (no-op if no sampler).
+        if self.train_sampler is not None:
+            self.train_sampler.set_epoch(epoch)
         # Discard any partial accumulation left over from the previous epoch's tail.
         self.optimizer.zero_grad()
         accum       = _LossAccumulator()

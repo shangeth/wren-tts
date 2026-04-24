@@ -12,18 +12,23 @@ text → tokenizer → LLM backbone → k Mimi-code heads → Mimi decoder → 2
 ## Released
 
 **Model:** [shangeth/Wren-TTS-360M-v1](https://huggingface.co/shangeth/Wren-TTS-360M-v1) —
-SmolLM2-360M backbone, trained on LibriSpeech train-clean-{100,360}.
+SmolLM2-360M backbone, trained on LibriTTS-R train-clean-{100,360} + train-other-500.
+Multispeaker — requires a reference audio clip at inference for voice conditioning.
 
-**Coming next:** v1.1 (EOS-reweighting fine-tune + LJSpeech voice), v2 (retrained on LibriTTS-R).
+**In progress:** v1.1 — fine-tune of v1 with broader speaker coverage (VCTK, Jenny added; LibriTTS-R/LJSpeech replayed at 10%/epoch).
 
 ## Quickstart — inference
 
 ```bash
-pip install torch torchaudio transformers
+pip install torch torchaudio transformers datasets
 ```
+
+> A reference audio clip is **required**. The model is multispeaker-only.
 
 ```python
 import torch
+import numpy as np
+from datasets import load_dataset
 from transformers import AutoModel, AutoProcessor
 
 model_id  = "shangeth/Wren-TTS-360M-v1"
@@ -31,11 +36,18 @@ device    = "cuda" if torch.cuda.is_available() else "cpu"
 processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 model     = AutoModel.from_pretrained(model_id, trust_remote_code=True).to(device).eval()
 
+# Reference voice (one LibriSpeech test-clean clip; swap for your own .wav)
+sample  = next(iter(load_dataset("openslr/librispeech_asr", "clean", split="test", streaming=True)))
+ref_wav = torch.from_numpy(np.asarray(sample["audio"]["array"], dtype=np.float32)).unsqueeze(0)
+ref_sr  = sample["audio"]["sampling_rate"]
+ref_codes = model.encode_audio(ref_wav, ref_sr)[:, :150]
+
 inputs = processor("Hello world, how are you today?")
 inputs = {k: v.to(device) for k, v in inputs.items()}
 
 waveform = model.generate(
     **inputs,
+    ref_codes=ref_codes,
     max_audio_frames=200, min_audio_frames=2,
     temperature=0.8, top_k=50, top_p=0.9,
     output_audio=True,
@@ -43,16 +55,17 @@ waveform = model.generate(
 processor.save_audio(waveform, "out.wav")
 ```
 
-Voice cloning + sampling tips: see the [model card](https://huggingface.co/shangeth/Wren-TTS-360M-v1).
+Sampling tips + more usage: see the [model card](https://huggingface.co/shangeth/Wren-TTS-360M-v1).
 
 ## Architecture
 
 - **Backbone:** any HF causal LM (default [SmolLM2-360M](https://huggingface.co/HuggingFaceTB/SmolLM2-360M))
 - **Audio tokenizer:** Mimi @ 24 kHz, 12.5 fps, 2048-entry codebooks
-- **Codebooks used:** `k` per training config (default 3 of 8 extracted)
-- **Interleaved layout:** `[ text | <audio_sep> | cb0_f0 cb1_f0 cb2_f0 | cb0_f1 … | AUDIO_EOS ]`
-- **Per-codebook heads:** `Linear(hidden, 2048)`. `cb0` has one extra class (`AUDIO_EOS`).
-- **Optional voice cloning:** prepend `<audio_start> ref_codes <audio_end>` to the prompt.
+- **Codebooks used:** all 8 Mimi codebooks (`k_codebooks=8`)
+- **Layout:** MusicGen-style **delay pattern** — at each step, k summed codebook input embeddings → k parallel heads. Codebook q at frame f lives at step `s = f + q`. Sequence length is `T + k − 1` instead of `T × k`.
+- **Per-codebook input tables:** `Embedding(2049, hidden)` — extra row = `AUDIO_PAD` for sequence edges
+- **Per-codebook output heads:** `Linear(hidden, 2048)` for cb1..cb7. cb0 gets `Linear(hidden, 2049)` with the extra class = `AUDIO_EOS` (stop token)
+- **Speaker conditioning (required):** prepend `<|reference_start|> ref_codes <|reference_end|>` to the prompt
 
 ## Training
 
@@ -68,32 +81,33 @@ Training streams Mimi-encoded codes from a HuggingFace dataset repo — no local
 `data/` or extraction step required. Parquet files are cached under
 `~/.cache/huggingface/` on first call.
 
+Recommended path: launch from a YAML in `experiments/`:
+
 ```bash
-# Default: LibriSpeech train-clean-{100,360}
-python train.py
+# v1: from-scratch on LibriTTS-R (~22 h on A100-40GB)
+python train.py --config experiments/wren-tts-360m-v1.yaml
 
-# LJSpeech (single speaker)
-python train.py --hf_dataset shangeth/ljspeech-mimi-codes --hf_splits train
-
-# Custom LibriSpeech split mix
-python train.py --hf_splits train_clean_100,train_clean_360,train_other_500
+# v1.1: fine-tune of v1 — adds VCTK + Jenny, replays LibriTTS-R/LJSpeech at 10%/epoch
+python train.py --config experiments/wren-tts-360m-v1.1.yaml
 ```
 
-Common flags:
+Key flags (from `Config` defaults):
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--hf_dataset` | `shangeth/librispeech-mimi-codes` | any dataset with Wren's schema |
-| `--hf_splits` | `train_clean_100,train_clean_360` | comma-sep list of HF splits to concat |
-| `--lowercase_text` | true | LibriSpeech is pre-lowercased; turn off for mixed-case corpora |
+| `--hf_datasets` | `[shangeth/librispeech-mimi-codes]` | parallel list of HF dataset repos |
+| `--hf_splits` | `[train_clean_100,train_clean_360]` | parallel list of comma-sep splits per dataset |
+| `--hf_weights` | `[1.0]` | per-dataset fraction. `<1.0` → per-epoch stratified-by-speaker subsample (resampled fresh each epoch) |
 | `--llm_name` | `HuggingFaceTB/SmolLM2-360M` | any causal LM |
-| `--k_codebooks` | `3` | audio codebooks used during training (datasets ship 8) |
-| `--batch_size` | `8` | per-step batch |
-| `--grad_accum_steps` | `4` | effective batch = 32 |
-| `--lr` | `1e-4` | peak LR |
+| `--k_codebooks` | `8` | Mimi codebooks used (delay pattern makes k=8 tractable) |
+| `--batch_size` | `4` | per-step batch (bump to 16 on A100-40GB) |
+| `--grad_accum_steps` | `4` | effective batch = batch_size × this |
+| `--lr` | `1e-4` | peak LR; `3e-5` for fine-tune |
 | `--epochs` | `50` | |
-| `--use_lora` | false | freeze backbone, train adapters + audio heads |
+| `--multispeaker` | `true` | prepend a reference-audio block during training |
+| `--eos_loss_weight` | `1.0` | bump to 50–100 to fix EOS underlearning |
 | `--resume_from` | `None` | path to a `.pt` checkpoint |
+| `--reset_optimizer` | `false` | with `resume_from`: load only model weights, reset optimizer/scheduler/step (for fine-tune) |
 
 See `python train.py --help` for everything. YAML configs via `--config path.yaml`.
 
@@ -169,19 +183,16 @@ Rough per-sample cost on a single GPU: **10–15 s** (dominated by Wren's autore
 
 - **Reference audio for SECS is Mimi-decoded** from the cached codes (self-contained, no extra dataset download needed). Codec loss is ~constant across samples, so *relative* SECS across model versions is comparable. *Absolute* SECS is biased high because both generated and reference audio carry the same codec fingerprint.
 - **EER negatives** are random different-speaker utterances from the same split. With n<100 pairs, EER has substantial variance.
-- **v1 hallucination** is largely suppressed under reference conditioning. To measure the raw (unconditioned) hallucination, you'd need to disable the reference block — not currently a flag.
+- **Reference conditioning** masks most hallucination in evaluation. Since the model requires a reference at inference anyway, raw (unconditioned) WER/CER aren't meaningful targets.
 
 Metric implementations live in [`metrics.py`](metrics.py) as reusable classes — import them directly for custom eval loops.
 
 ## Inference (CLI)
 
-```bash
-python inference.py \
-  --checkpoint checkpoints/best.pt \
-  --text "Hello world." \
-  --out_dir out/
+`--ref_audio` is effectively required — the model is trained multispeaker-only and
+ref-less output quality is poor.
 
-# Voice cloning
+```bash
 python inference.py \
   --checkpoint checkpoints/best.pt \
   --text "Hello world." \
@@ -232,11 +243,12 @@ python hf/push.py \
 
 ## Known issues
 
-- **EOS hallucination (v1):** occasionally generates plausible speech *past* the
-  input text. Caused by class imbalance in the `AUDIO_EOS` supervision. Mitigations
-  at inference: raise `eos_bias`, lower `max_audio_frames`, lower `temperature`.
-  Proper fix (cb0 cross-entropy reweighting) lands in v1.1.
-- **English only**, audiobook-style prosody inherited from LibriSpeech.
+- **EOS hallucination:** occasionally generates plausible speech *past* the input
+  text. Mitigations at inference: raise `eos_bias` (e.g. 2–6), lower `max_audio_frames`,
+  lower `temperature`. Reduced (not eliminated) in v1 by `eos_loss_weight=50` during training.
+- **cb0 overfits earlier than cb3–cb7** — coarse semantic codebook is over-pressured
+  in v1 (cb0 weight 2×). Addressed in v1.1 with uniform per-codebook weights.
+- **English only**, audiobook-style prosody inherited from LibriTTS-R / LJSpeech.
 
 ## Citation
 

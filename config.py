@@ -68,6 +68,10 @@ class Config:
     checkpoint_dir:        str   = "checkpoints"
     keep_last_n:           int   = 3
     resume_from:           Optional[str] = None
+    # When True with resume_from set: load ONLY model weights from the checkpoint and start
+    # optimizer/scheduler/step/epoch fresh. Use this for fine-tuning from a previous run
+    # with a new LR schedule. Default False = full resume (continues the prior schedule).
+    reset_optimizer:       bool  = False
 
     # --- Logging ---
     logger:                Optional[str] = "tensorboard"   # "tensorboard" | "wandb" | null
