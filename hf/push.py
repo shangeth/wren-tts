@@ -43,6 +43,10 @@ from modeling_wren     import WrenForTTS               # noqa: E402
 
 REMOTE_CODE_FILES = ["configuration_wren.py", "modeling_wren.py", "processing_wren.py"]
 
+# Fetched from LibriSpeech test-clean (NOT in training set) to ship as a demo reference voice
+# so users can run voice-cloning out of the box without finding their own .wav.
+REFERENCE_WAV_FILENAME = "reference.wav"
+
 AUTO_MAP_MODEL = {
     "AutoConfig": "configuration_wren.WrenConfig",
     "AutoModel":  "modeling_wren.WrenForTTS",
