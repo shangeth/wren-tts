@@ -25,7 +25,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 try:
     from .configuration_wren import WrenConfig          # package context (HF trust_remote_code)
 except ImportError:
-    from configuration_wren import WrenConfig           # flat context (our push script)
+    # Flat-file context (push.py adds hf/ to sys.path). Use importlib so transformers'
+    # `check_imports` static scanner doesn't misread this as an external pip dependency.
+    import importlib
+    WrenConfig = importlib.import_module("configuration_wren").WrenConfig
 
 
 class WrenForTTS(PreTrainedModel):

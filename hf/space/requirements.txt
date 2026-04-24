@@ -1,4 +1,6 @@
 gradio>=4.44
+# Pin for Gradio 4.44.1 compatibility: HfFolder was removed in huggingface_hub 0.30.
+huggingface_hub<0.30
 torch
 torchaudio
 transformers>=4.40
