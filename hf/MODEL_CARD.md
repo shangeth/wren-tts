@@ -16,6 +16,8 @@ pipeline_tag: text-to-speech
 datasets:
 - mythicinfinity/libritts_r
 - keithito/lj_speech
+- CSTR-Edinburgh/vctk
+- reach-vb/jenny_tts_dataset
 ---
 
 # Wren-TTS-360M (v1)
@@ -51,9 +53,15 @@ text ──► SmolLM2-360M ──► k=8 parallel Mimi heads ──► Mimi dec
 
 ## Training data
 
-- [LibriTTS-R](https://huggingface.co/datasets/mythicinfinity/libritts_r)
-  `train-clean-{100,360}` + `train-other-500` — ~960 h multi-speaker English
-- [LJSpeech](https://keithito.com/LJ-Speech-Dataset/) — ~24 h single speaker
+Trained on four English speech corpora simultaneously:
+
+- **VCTK** — 109 speakers across multiple English accents (~44k utterances)
+- **Jenny** — single high-quality voice (~21k utterances)
+- [**LibriTTS-R**](https://huggingface.co/datasets/mythicinfinity/libritts_r) `train-clean-{100,360}` + `train-other-500` — ~960 h multi-speaker English audiobooks (~354k utterances)
+- [**LJSpeech**](https://keithito.com/LJ-Speech-Dataset/) — single speaker, ~24 h (~13k utterances)
+
+Single-pass training (no two-stage pretraining + fine-tune). Held-out validation:
+LibriTTS-R `dev_clean` + 5% of each non-LibriTTS source (deterministic shuffle, seed 2027).
 
 Text casing and punctuation are preserved. Pass text naturally — do not pre-lowercase.
 

@@ -320,34 +320,52 @@ def _load_hf_split(
     from datasets import load_dataset, concatenate_datasets
 
     n_ds = len(cfg.hf_datasets)
-    weights = list(cfg.hf_weights) + [1.0] * max(0, n_ds - len(cfg.hf_weights))
+    weights          = list(cfg.hf_weights)          + [1.0] * max(0, n_ds - len(cfg.hf_weights))
+    val_from_train   = list(cfg.hf_val_from_train)   + [0.0] * max(0, n_ds - len(cfg.hf_val_from_train))
 
-    loaded = []
-    for repo, splits_str, weight in zip(cfg.hf_datasets, cfg.hf_splits, weights):
+    # Load each train source + deterministically split off its val portion (if configured).
+    # loaded_train: (repo, splits_str, train_ds, weight)
+    # loaded_val_from_train: (repo, splits_str, val_ds)
+    loaded_train = []
+    loaded_val_from_train = []
+    for repo, splits_str, weight, vf in zip(cfg.hf_datasets, cfg.hf_splits, weights, val_from_train):
         split_names = [s.strip() for s in splits_str.split(",")]
         parts = [load_dataset(repo, split=s) for s in split_names]
         ds    = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
         ds    = _normalize_schema(ds, repo)
-        loaded.append((repo, splits_str, ds, weight))
-        logger.info(f"  {repo} [{splits_str}]: {len(ds)} rows  (weight={weight})")
 
-    combined    = concatenate_datasets([d for _, _, d, _ in loaded]) if len(loaded) > 1 else loaded[0][2]
+        if vf > 0.0:
+            n = len(ds)
+            n_val = max(1, int(n * vf))
+            shuffled   = ds.shuffle(seed=2027)   # deterministic (seed distinct from other shuffles)
+            train_part = shuffled.select(range(n - n_val))
+            val_part   = shuffled.select(range(n - n_val, n))
+            logger.info(f"  {repo} [{splits_str}]: {n} rows  "
+                        f"(weight={weight}, carved val {n_val}/{n} = {vf:.0%})")
+            loaded_train.append((repo, splits_str, train_part, weight))
+            loaded_val_from_train.append((repo, splits_str, val_part))
+        else:
+            logger.info(f"  {repo} [{splits_str}]: {len(ds)} rows  (weight={weight})")
+            loaded_train.append((repo, splits_str, ds, weight))
+
+    combined    = concatenate_datasets([d for _, _, d, _ in loaded_train]) if len(loaded_train) > 1 else loaded_train[0][2]
     source_meta = []
     cursor = 0
-    for _, _, d, w in loaded:
+    for _, _, d, w in loaded_train:
         source_meta.append((cursor, cursor + len(d), w))
         cursor += len(d)
 
-    use_explicit_val = bool(cfg.hf_val_datasets)
+    use_explicit_val    = bool(cfg.hf_val_datasets)
+    use_val_from_train  = bool(loaded_val_from_train)
 
     if split == "train":
-        if use_explicit_val:
+        if use_explicit_val or use_val_from_train:
+            # Val is sourced explicitly and/or carved per-dataset — train gets everything here.
             return combined, source_meta
-        # Fallback: carve val_fraction off the tail of combined train data.
+        # Legacy fallback: carve val_fraction off the tail of combined train data.
         n = len(combined)
         n_val = max(1, int(n * cfg.val_fraction))
         train_ds = combined.select(range(n - n_val))
-        # Truncate source_meta to the train range (drop any sources beyond train cutoff).
         truncated_meta = []
         for s, e, w in source_meta:
             if s >= n - n_val:
@@ -356,18 +374,24 @@ def _load_hf_split(
         return train_ds, truncated_meta
 
     if split == "val":
-        if use_explicit_val:
-            val_parts = []
-            for repo, splits_str in zip(cfg.hf_val_datasets, cfg.hf_val_splits):
-                split_names = [s.strip() for s in splits_str.split(",")]
-                parts = [load_dataset(repo, split=s) for s in split_names]
-                val_ds = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
-                val_ds = _normalize_schema(val_ds, repo)
-                val_parts.append(val_ds)
-                logger.info(f"  val: {repo} [{splits_str}]: {val_ds.num_rows} rows")
+        val_parts: list = []
+        # a) per-dataset carved-off val slices
+        for repo, splits_str, val_ds in loaded_val_from_train:
+            val_parts.append(val_ds)
+            logger.info(f"  val (from-train): {repo} [{splits_str}]: {val_ds.num_rows} rows")
+        # b) explicit hf_val_datasets
+        for repo, splits_str in zip(cfg.hf_val_datasets, cfg.hf_val_splits):
+            split_names = [s.strip() for s in splits_str.split(",")]
+            parts = [load_dataset(repo, split=s) for s in split_names]
+            val_ds = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
+            val_ds = _normalize_schema(val_ds, repo)
+            val_parts.append(val_ds)
+            logger.info(f"  val (explicit):   {repo} [{splits_str}]: {val_ds.num_rows} rows")
+
+        if val_parts:
             val_combined = concatenate_datasets(val_parts) if len(val_parts) > 1 else val_parts[0]
-            # Val never subsamples — single "source" with weight 1.0
             return val_combined, [(0, len(val_combined), 1.0)]
+
         # Fallback: tail fraction of combined train data.
         n = len(combined)
         n_val = max(1, int(n * cfg.val_fraction))

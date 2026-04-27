@@ -1,7 +1,10 @@
-gradio>=4.44
-# Pin for Gradio 4.44.1 compatibility: HfFolder was removed in huggingface_hub 0.30.
+gradio>=5.9
+# Gradio 5.0–5.8 still imports HfFolder in oauth.py; removed from huggingface_hub in 0.30.
+# 5.9+ may have dropped this — pin kept as a safety net, not a current requirement.
 huggingface_hub<0.30
 torch
-torchaudio
+torchaudio  # model.encode_audio uses torchaudio.transforms.Resample (pure torch ops, no I/O)
+# soundfile replaces torchaudio's I/O which was removed in torchaudio 2.6+.
+soundfile>=0.12
 transformers>=4.40
 numpy

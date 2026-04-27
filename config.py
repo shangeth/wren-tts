@@ -28,6 +28,12 @@ class Config:
     hf_datasets:           List[str]   = field(default_factory=lambda: ["shangeth/librispeech-mimi-codes"])
     hf_splits:             List[str]   = field(default_factory=lambda: ["train_clean_100,train_clean_360"])
     hf_weights:            List[float] = field(default_factory=lambda: [1.0])
+    # Parallel to hf_datasets. For each train dataset, fraction (in [0,1)) of its rows
+    # to hold out as validation. Useful when the dataset has no explicit dev split.
+    # 0.0 = use full dataset for training (default). e.g. [0.1, 0.1, 0.0, 0.1] carves
+    # 10% of each dataset as val EXCEPT the third one (which should have its own dev
+    # split listed under hf_val_datasets). Split is deterministic (shuffle with seed).
+    hf_val_from_train:     List[float] = field(default_factory=list)
     # Optional explicit val sources. If non-empty, used as-is for validation.
     # If empty, falls back to val_fraction tail of the combined training data.
     hf_val_datasets:       List[str]   = field(default_factory=list)

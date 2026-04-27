@@ -1,0 +1,61 @@
+# Wren-TTS-360M v2 — from-scratch training on the full mix (no v1→v1.1 two-stage).
+#
+# Data mix (per epoch, after stratified sampling):
+#   - VCTK              100% every epoch  (~44k, 109 speakers, multiple accents)
+#   - Jenny             100% every epoch  (~21k, single high-quality voice)
+#   - LibriTTS-R         10% per epoch    (~35k/epoch, stratified-by-speaker; fresh rows each epoch)
+#   - LJSpeech          100% every epoch  (~13k, single speaker)
+#   Total per-epoch ≈ 113k rows (effective batch 32 → ~3.5k opt steps/epoch).
+#
+# Val:
+#   - LibriTTS-R dev_clean (explicit, ~5.7k rows after filter)
+#   - 10% held-out from VCTK / Jenny / LJSpeech train (deterministic seed=2027)
+#   → Single concatenated val set; loss/EOS-accuracy averaged across all of it.
+
+hf_datasets:
+  - shangeth/vctk-mimi-codes
+  - shangeth/jenny-mimi-codes
+  - shangeth/libritts-r-mimi-codes
+  - shangeth/ljspeech-mimi-codes
+
+hf_splits:
+  - train
+  - train
+  - train_clean_100,train_clean_360,train_other_500
+  - train
+
+hf_weights:          [1.0, 1.0, 1.0, 1.0]
+
+# 10% carved from train for val on sets that have no dev split; libritts-r uses dev_clean.
+hf_val_from_train:   [0.05, 0.05, 0.0, 0.05]
+
+hf_val_datasets: [shangeth/libritts-r-mimi-codes]
+hf_val_splits:   [dev_clean]
+
+# --- Architecture ---
+k_codebooks: 8
+# Uniform per-codebook weights — avoids v1's cb0-overfit pattern (cb0 was 2× in v1).
+cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+multispeaker:    true
+eos_loss_weight: 50.0
+
+# --- Batch sizing (A100-40GB) ---
+batch_size:       16
+grad_accum_steps: 2        # effective batch = 32
+
+# --- From-scratch training schedule ---
+resume_from:     null
+reset_optimizer: false
+lr:              1.0e-4
+weight_decay:    0.01
+lr_warmup_steps: 500
+lr_decay_steps:  5000     # floor; trainer auto-extends to ~epochs × steps_per_epoch ≈ 105k
+epochs:          30
+
+log_audio_every: 1000
+
+checkpoint_dir:  checkpoints/v2.1
+log_dir:         runs/v2.1
+logger:          wandb
+wandb_project:   wren
+wandb_run_name:  wren-tts-360m-v2.1

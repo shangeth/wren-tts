@@ -11,10 +11,40 @@ import os
 import tempfile
 from pathlib import Path
 
+# --- Monkey-patch workaround for gradio_client bool-schema bug ---
+# Several gradio_client.utils functions do `"x" in schema` (`get_type`, `get_desc`),
+# which crashes on bool schemas (JSON Schema's `additionalProperties: true`).
+# Intercept the recursive entry point so non-dict schemas short-circuit to "Any".
+# Must run BEFORE gradio is imported (which in turn imports gradio_client).
+import gradio_client.utils as _gc_utils  # noqa: E402
+_orig_json_to_py = _gc_utils._json_schema_to_python_type
+def _safe_json_to_py(schema, defs=None):
+    if not isinstance(schema, dict):
+        return "Any"
+    return _orig_json_to_py(schema, defs)
+_gc_utils._json_schema_to_python_type = _safe_json_to_py
+
 import gradio as gr
+import numpy as np
+import soundfile as sf
 import torch
-import torchaudio
 from transformers import AutoModel, AutoProcessor
+
+
+def _load_wav(path: str):
+    """Read a WAV via soundfile and return (tensor [1, T] float32, sr)."""
+    arr, sr = sf.read(str(path), dtype="float32", always_2d=False)
+    if arr.ndim == 2:                             # [T, C] — mix to mono
+        arr = arr.mean(axis=1)
+    return torch.from_numpy(arr).unsqueeze(0), sr
+
+
+def _save_wav(path: str, wav_tensor: torch.Tensor, sr: int):
+    """Save a [1, T] or [T] torch tensor as WAV via soundfile."""
+    arr = wav_tensor.detach().cpu().float().numpy()
+    if arr.ndim == 2:
+        arr = arr.squeeze(0)                      # [1, T] -> [T]
+    sf.write(str(path), arr, sr)
 
 MODEL_ID = "shangeth/Wren-TTS-360M-v1"
 DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
@@ -22,8 +52,10 @@ SR_OUT   = 24000
 
 # ----- Load model (cold start) -----
 print(f"Loading {MODEL_ID} on {DEVICE} ...")
-processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
-model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True).to(DEVICE).eval()
+# force_download=True bypasses any stale transformers_modules cache — safe to keep.
+# Adds ~30s to cold start but guarantees we always get the current remote code + weights.
+processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, force_download=True)
+model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True, force_download=True).to(DEVICE).eval()
 print("Model loaded.")
 
 # ----- Bundled reference clips — pre-encoded once at startup -----
@@ -40,9 +72,7 @@ for label, fn in BUNDLED_LABELS.items():
     if not path.exists():
         print(f"  WARN bundled sample missing: {path}")
         continue
-    wav, sr = torchaudio.load(str(path))
-    if wav.shape[0] > 1:
-        wav = wav.mean(dim=0, keepdim=True)  # stereo → mono
+    wav, sr = _load_wav(str(path))
     with torch.no_grad():
         codes = model.encode_audio(wav, sr)[:, :150]
     SAMPLE_CACHE[label] = codes
@@ -65,12 +95,10 @@ def synthesize(text, voice_label, uploaded_audio,
         if uploaded_audio is None:
             return None, "⚠️ Please upload a reference .wav, or pick a bundled sample."
         try:
-            wav, sr = torchaudio.load(uploaded_audio)
+            wav, sr = _load_wav(uploaded_audio)
             print(f"[synth] upload loaded: shape={tuple(wav.shape)} sr={sr} "
                   f"dur={wav.shape[-1]/sr:.2f}s "
                   f"rms={wav.pow(2).mean().sqrt().item():.4f}")
-            if wav.shape[0] > 1:
-                wav = wav.mean(dim=0, keepdim=True)
             # Cap to ~10 s to limit encoding cost on CPU
             max_samples = int(sr * 10)
             wav = wav[:, :max_samples]
@@ -111,7 +139,7 @@ def synthesize(text, voice_label, uploaded_audio,
 
     dur = waveform.shape[-1] / SR_OUT
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    torchaudio.save(tmp.name, waveform.cpu(), SR_OUT)
+    _save_wav(tmp.name, waveform, SR_OUT)
     return tmp.name, f"✅ Generated {dur:.2f}s"
 
 
@@ -219,4 +247,7 @@ with gr.Blocks(title="Wren-TTS-360M v1", theme=gr.themes.Soft()) as demo:
 
 
 if __name__ == "__main__":
-    demo.queue(max_size=8).launch()
+    # show_api=False disables the /info endpoint. gradio_client<1.6 has a bug where
+    # `get_type(schema)` crashes on bool schemas (additionalProperties: true), which
+    # affects page loads. Disabling the API docs sidesteps the whole code path.
+    demo.queue(max_size=8).launch(show_api=False)

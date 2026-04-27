@@ -208,9 +208,14 @@ class UTMOS:
 
     def compute(self) -> dict:
         if not self._scores:
-            return {"mean": float("nan"), "std": float("nan"), "n": 0}
-        s = np.asarray(self._scores)
-        return {"mean": float(s.mean()), "std": float(s.std()), "n": int(s.size)}
+            return {"mean": float("nan"), "std": float("nan"), "n": 0, "n_nan": 0}
+        s = np.asarray(self._scores, dtype=np.float64)
+        n_nan = int(np.isnan(s).sum())
+        valid = s[~np.isnan(s)]
+        if valid.size == 0:
+            return {"mean": float("nan"), "std": float("nan"), "n": 0, "n_nan": n_nan}
+        return {"mean": float(valid.mean()), "std": float(valid.std()),
+                "n": int(valid.size), "n_nan": n_nan}
 
     def reset(self):
         self._scores.clear()
@@ -273,9 +278,14 @@ class SECS:
 
     def compute(self) -> dict:
         if not self._scores:
-            return {"mean": float("nan"), "std": float("nan"), "n": 0}
-        s = np.asarray(self._scores)
-        return {"mean": float(s.mean()), "std": float(s.std()), "n": int(s.size)}
+            return {"mean": float("nan"), "std": float("nan"), "n": 0, "n_nan": 0}
+        s = np.asarray(self._scores, dtype=np.float64)
+        n_nan = int(np.isnan(s).sum())
+        valid = s[~np.isnan(s)]
+        if valid.size == 0:
+            return {"mean": float("nan"), "std": float("nan"), "n": 0, "n_nan": n_nan}
+        return {"mean": float(valid.mean()), "std": float(valid.std()),
+                "n": int(valid.size), "n_nan": n_nan}
 
     def reset(self):
         self._scores.clear()
@@ -303,13 +313,23 @@ class EER:
     def compute(self) -> dict:
         if not self.positives or not self.negatives:
             return {"eer": float("nan"), "threshold": float("nan"),
-                    "n_pos": len(self.positives), "n_neg": len(self.negatives)}
+                    "n_pos": len(self.positives), "n_neg": len(self.negatives), "n_nan": 0}
 
         from sklearn.metrics import roc_curve
-        y_true  = np.concatenate([np.ones(len(self.positives)),
-                                  np.zeros(len(self.negatives))])
-        y_score = np.concatenate([np.asarray(self.positives),
-                                  np.asarray(self.negatives)])
+        y_true_full  = np.concatenate([np.ones(len(self.positives)),
+                                       np.zeros(len(self.negatives))])
+        y_score_full = np.concatenate([np.asarray(self.positives, dtype=np.float64),
+                                       np.asarray(self.negatives, dtype=np.float64)])
+        # Drop NaN/inf — caused by degenerate audio (e.g. WavLM std on too-short input).
+        mask    = np.isfinite(y_score_full)
+        n_nan   = int((~mask).sum())
+        y_true  = y_true_full[mask]
+        y_score = y_score_full[mask]
+        if y_true.sum() == 0 or y_true.sum() == y_true.size:
+            # All same class after filtering — EER undefined.
+            return {"eer": float("nan"), "threshold": float("nan"),
+                    "n_pos": int(y_true.sum()), "n_neg": int(y_true.size - y_true.sum()),
+                    "n_nan": n_nan}
         fpr, tpr, thresholds = roc_curve(y_true, y_score)
         fnr = 1.0 - tpr
         idx = int(np.nanargmin(np.abs(fpr - fnr)))
@@ -319,6 +339,7 @@ class EER:
             "threshold": float(thresholds[idx]),
             "n_pos":     len(self.positives),
             "n_neg":     len(self.negatives),
+            "n_nan":     n_nan,
         }
 
     def reset(self):
