@@ -83,8 +83,11 @@ class Trainer:
         self.train_sampler = train_sampler  # EpochStratifiedSampler or None
 
         self.device = torch.device(config.device)
+        n_params_M = sum(p.numel() for p in model.parameters()) / 1e6
+        logger.info(f"Moving {n_params_M:.1f}M-param model to {self.device}...")
         self.model.to(self.device)
 
+        logger.info("Initializing AdamW optimizer (allocates ~12 bytes/param of optimizer state)...")
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=config.lr,
@@ -131,6 +134,7 @@ class Trainer:
 
         self._run_logger = None
         if getattr(config, "logger", None):
+            logger.info(f"Initializing {config.logger} logger...")
             self._run_logger = _make_logger(config.log_dir, config.logger, config)
 
         logging.basicConfig(

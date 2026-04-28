@@ -190,15 +190,22 @@ class HFMimiDataset(Dataset):
 
         import numpy as np
 
+        n_total = len(hf_dataset)
+        logger.info(f"HF dataset: indexing {n_total:,} rows...")
+
         # --- Vectorized n_frames filter (no Python loop) ---
+        # Materializing a column from a 1M+ row Arrow table can take ~5-10s; log it
+        # so the silence is legible.
+        logger.info("  loading n_frames column...")
         n_frames_arr = np.array(hf_dataset["n_frames"])
         frames_ok    = n_frames_arr <= cfg.max_audio_frames
 
         # --- Batch tokenize in chunks (100-200x faster than per-row loop) ---
+        logger.info("  loading text column...")
         texts = hf_dataset["text"]
         CHUNK = 2000
         text_lengths = np.zeros(len(texts), dtype=np.int32)
-        for start in tqdm(range(0, len(texts), CHUNK), desc="Tokenizing dataset"):
+        for start in tqdm(range(0, len(texts), CHUNK), desc="  tokenizing"):
             batch   = texts[start : start + CHUNK]
             lengths = tokenizer(batch, add_special_tokens=False, return_length=True)["length"]
             text_lengths[start : start + CHUNK] = lengths
@@ -207,11 +214,16 @@ class HFMimiDataset(Dataset):
         kept_mask = frames_ok & text_ok
         kept_rows = list(np.where(kept_mask)[0])
 
-        # --- Speaker index (only over kept rows, fast) ---
+        # --- Speaker index (only over kept rows) ---
+        # On large mixes (1M+ rows) the Python dict-build loop is silent for ~15-30s
+        # without progress; tqdm wrap makes it legible.
         speaker_to_indices: dict = {}
         if self.has_speakers:
+            logger.info("  loading speaker_id column...")
             speakers_col = hf_dataset["speaker_id"]
-            for local_idx, row_idx in enumerate(kept_rows):
+            for local_idx, row_idx in tqdm(
+                enumerate(kept_rows), total=len(kept_rows), desc="  speaker index",
+            ):
                 speaker_to_indices.setdefault(speakers_col[row_idx], []).append(local_idx)
 
         self.indices             = kept_rows
@@ -323,12 +335,15 @@ def _load_hf_split(
     weights          = list(cfg.hf_weights)          + [1.0] * max(0, n_ds - len(cfg.hf_weights))
     val_from_train   = list(cfg.hf_val_from_train)   + [0.0] * max(0, n_ds - len(cfg.hf_val_from_train))
 
+    logger.info(f"Loading {n_ds} HF dataset source(s) for split={split!r}...")
+
     # Load each train source + deterministically split off its val portion (if configured).
     # loaded_train: (repo, splits_str, train_ds, weight)
     # loaded_val_from_train: (repo, splits_str, val_ds)
     loaded_train = []
     loaded_val_from_train = []
-    for repo, splits_str, weight, vf in zip(cfg.hf_datasets, cfg.hf_splits, weights, val_from_train):
+    for i, (repo, splits_str, weight, vf) in enumerate(zip(cfg.hf_datasets, cfg.hf_splits, weights, val_from_train)):
+        logger.info(f"  [{i+1}/{n_ds}] load_dataset({repo!r}, split={splits_str!r})...")
         split_names = [s.strip() for s in splits_str.split(",")]
         parts = [load_dataset(repo, split=s) for s in split_names]
         ds    = concatenate_datasets(parts) if len(parts) > 1 else parts[0]

@@ -64,16 +64,18 @@ def main():
     )
 
     # Dataloaders
+    print("\n>>> Building TRAIN dataloader")
     train_loader, train_sampler = get_dataloader(
         "train", tokenizer, audio_start_id, cfg, shuffle=True,
         reference_start_id=reference_start_id, reference_end_id=reference_end_id,
     )
+    print("\n>>> Building VAL dataloader")
     val_loader, _ = get_dataloader(
         "val", tokenizer, audio_start_id, cfg, shuffle=False,
         reference_start_id=reference_start_id, reference_end_id=reference_end_id,
     )
 
-    print(f"Train pool: {len(train_loader.dataset)} rows")
+    print(f"\nTrain pool: {len(train_loader.dataset)} rows")
     if train_sampler is not None:
         print(f"  per-epoch sample (stratified): {len(train_sampler)} rows  (resampled fresh each epoch)")
     print(f"Val examples: {len(val_loader.dataset)}")
