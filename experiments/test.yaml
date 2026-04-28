@@ -1,0 +1,100 @@
+# Smoke test for v2-multilingual setup — verifies the pipeline before committing
+# to the real ~1.7-day run.
+#
+# What this exercises:
+#   - Qwen2.5-0.5B loads + tokenizer adds <|audio_start|>, <|reference_start|>,
+#     <|reference_end|> + embedding table resizes
+#   - All 5 dataset sources load (incl. MLS via its `all` default config)
+#   - _normalize_schema reconciles VCTK/Jenny/LJSpeech/LibriTTS/MLS heterogeneity
+#   - Train forward + backward + optimizer step + LR schedule
+#   - Val forward path
+#   - Audio logging via Mimi decode (log_audio_every=5 to fire at least once)
+#   - Wandb scalar + audio uploads
+#   - Checkpoint save
+#
+# Expected runtime: ~3–5 min after datasets are cached. First run will download
+# ~25 GB to ~/.cache/huggingface, dominated by MLS — subsequent runs are fast.
+#
+# Splits sliced to ~16 rows each → ~12 train steps + ~4 val steps total.
+#
+# Prerequisite: MLS's `all` config must be marked default on the Hub. Run once:
+#   cd /home/shangeth/ML/wren-datasets
+#   python mls.py --card_only --repo_id shangeth/mls-mimi-codes
+#
+# Run:
+#   cd /home/shangeth/ML/wren-tts
+#   python train.py --config experiments/test.yaml
+
+hf_datasets:
+  - shangeth/vctk-mimi-codes
+  - shangeth/jenny-mimi-codes
+  - shangeth/libritts-r-mimi-codes
+  - shangeth/ljspeech-mimi-codes
+  - shangeth/mls-mimi-codes
+
+hf_splits:
+  - train[:16]
+  - train[:16]
+  - train_clean_100[:16]
+  - train[:16]
+  - 1_hours[:32]              # MLS smallest split, default config "all" globs across 7 langs
+
+hf_weights:        [1.0, 1.0, 1.0, 1.0, 1.0]
+hf_val_from_train: [0.0, 0.0, 0.0, 0.0, 0.0]   # use explicit val instead
+
+hf_val_datasets:
+  - shangeth/libritts-r-mimi-codes
+  - shangeth/mls-mimi-codes
+hf_val_splits:
+  - dev_clean[:16]
+  - dev[:16]
+
+# --- LLM backbone ---
+llm_name: Qwen/Qwen2.5-0.5B
+use_lora: false
+
+# --- Mimi codec ---
+k_codebooks:     8
+codebook_size:   2048
+mimi_model_name: kyutai/mimi
+
+# --- Architecture / loss (matches v2-multilingual) ---
+cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+multispeaker:    true
+eos_loss_weight: 50.0
+
+# --- Sequence sizing (matches v2-multilingual) ---
+max_text_tokens:  200
+max_audio_frames: 300
+max_ref_frames:   150
+
+# --- Batch sizing — small for fast smoke ---
+batch_size:       8
+grad_accum_steps: 1
+
+# --- DataLoader — num_workers=0 keeps tracebacks readable on failure ---
+num_workers:     0
+pin_memory:      false
+prefetch_factor: 2
+
+# --- Training schedule — enough steps to fire LR warmup, AMP, audio log ---
+resume_from:     null
+reset_optimizer: false
+lr:              1.0e-4
+weight_decay:    0.01
+betas:           [0.9, 0.95]
+lr_warmup_steps: 5
+lr_decay_steps:  20
+epochs:          1
+
+grad_clip: 1.0
+use_amp:   true
+
+# --- Logging — fire audio path at step 5 to verify Mimi decode + wandb audio ---
+log_audio_every: 5
+checkpoint_dir:  checkpoints/test
+log_dir:         runs/test
+logger:          wandb
+wandb_project:   wren
+wandb_run_name:  smoke-test-multilingual
+keep_last_n:     1

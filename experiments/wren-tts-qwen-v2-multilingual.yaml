@@ -1,0 +1,116 @@
+# Wren-TTS v2-multilingual — Qwen2.5-0.5B backbone, English + 7-lang MLS mix.
+#
+# Why Qwen2.5-0.5B? SmolLM2 is English-pretrained and tokenizes non-Latin /
+# diacritic-heavy text poorly. Qwen2.5 is multilingual and has efficient tokens
+# for German/French/Italian/Spanish/Portuguese/Polish/Dutch.
+# Transformer body: ~358M non-embed params (vs SmolLM2-360M's ~316M) — compute
+# per step is comparable; the extra params live in the multilingual vocab table
+# (151k vs ~49k tokens) which is exactly what we want.
+#
+# Data mix — every row, every epoch (no subsampling):
+#   - VCTK             ~44k     (109 EN speakers, accents)
+#   - Jenny            ~21k     (single high-quality EN voice)
+#   - LibriTTS-R      ~360k     (concat: clean_100 + clean_360 + other_500)
+#   - LJSpeech         ~13k     (single EN speaker)
+#   - MLS (7 langs)    ~6.0M    (dutch + french + german + italian + polish + portuguese + spanish)
+#   Total per-epoch ≈ 6.44M rows. Effective batch 32 → ~201k opt steps/epoch.
+#   At ~7 steps/sec on A100: ~8 hr/epoch → 5 epochs ≈ 1.7 days.
+#
+# MLS uses its `all` virtual config (default), which globs across the 7 language
+# directories. `dev` likewise globs across all 7 langs (~14k rows of multilingual
+# val).
+#
+# Val:
+#   - LibriTTS-R dev_clean  (English, ~5.7k rows after filter)
+#   - MLS dev (7 langs)     (~14k rows, multilingual)
+#   - 5% held-out from VCTK / Jenny / LJSpeech (deterministic seed=2027)
+#
+# Speaker-id collisions: MLS speaker_ids are integers reused across languages
+# (German speaker 12345 ≠ French speaker 12345 in real life). The per-epoch
+# stratified sampler may bucket colliding IDs together — statistically rare
+# across thousands of speakers per language, so we accept the small bias.
+# (Sampler doesn't subsample anyway when all weights are 1.0, so this is a
+# theoretical concern only here.)
+#
+# Length budgets — measured across all 5 datasets, p99 / max:
+#   text tokens (Qwen2.5):  English ≤70/93,  MLS ≤99/117  →  200 keeps everything
+#   audio frames:          MLS hard-capped at 250 (~20s upstream segmentation),
+#                          LibriTTS/Jenny p99=241/174 max=336/424
+#                          → 300 keeps 100% of MLS/VCTK/LJSpeech, ~99% of others.
+#   ref frames:            150 = 12s @ 12.5 fps. Random other utterance from
+#                          same speaker, front-crop. Voice-ID saturates ~5-10s.
+
+hf_datasets:
+  - shangeth/vctk-mimi-codes
+  - shangeth/jenny-mimi-codes
+  - shangeth/libritts-r-mimi-codes
+  - shangeth/ljspeech-mimi-codes
+  - shangeth/mls-mimi-codes
+
+hf_splits:
+  - train
+  - train
+  - train_clean_100,train_clean_360,train_other_500
+  - train
+  - train
+
+hf_weights:        [1.0, 1.0, 1.0, 1.0, 1.0]
+hf_val_from_train: [0.05, 0.05, 0.0, 0.05, 0.0]
+
+hf_val_datasets:
+  - shangeth/libritts-r-mimi-codes
+  - shangeth/mls-mimi-codes
+hf_val_splits:
+  - dev_clean
+  - dev
+
+# --- LLM backbone ---
+llm_name: Qwen/Qwen2.5-0.5B
+use_lora: false
+
+# --- Mimi codec ---
+k_codebooks:     8
+codebook_size:   2048
+mimi_model_name: kyutai/mimi
+
+# --- Architecture / loss ---
+# Uniform per-codebook weights — keeps cb0 from overfitting (v1's pattern).
+cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+multispeaker:    true
+eos_loss_weight: 50.0
+
+# --- Sequence sizing (see header for measurements) ---
+max_text_tokens:  200
+max_audio_frames: 300
+max_ref_frames:   150
+
+# --- Batch sizing (A100-40GB) ---
+batch_size:       16
+grad_accum_steps: 2          # effective batch = 32
+
+# --- DataLoader ---
+num_workers:     4
+pin_memory:      true
+prefetch_factor: 2
+
+# --- From-scratch training schedule ---
+resume_from:     null
+reset_optimizer: false
+lr:              1.0e-4
+weight_decay:    0.01
+betas:           [0.9, 0.95]
+lr_warmup_steps: 2000        # longer than v2 (500) — bigger embed table + larger run
+lr_decay_steps:  5000        # floor; trainer auto-extends to ~epochs × steps_per_epoch
+epochs:          5           # ~1M opt steps total. Bump to 10 if you have compute.
+
+grad_clip: 1.0
+use_amp:   true
+
+# --- Logging ---
+log_audio_every: 1000
+checkpoint_dir:  checkpoints/v2-multilingual
+log_dir:         runs/v2-multilingual
+logger:          wandb
+wandb_project:   wren
+wandb_run_name:  wren-tts-qwen-v2-multilingual
+keep_last_n:     3
