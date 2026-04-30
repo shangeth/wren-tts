@@ -17,7 +17,10 @@ class WrenProcessor(ProcessorMixin):
     attributes        = ["tokenizer"]
     tokenizer_class   = "AutoTokenizer"
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, **kwargs):
+        # Recent `transformers` injects `chat_template` (and possibly other future
+        # fields) into processor_dict at load time. We don't use chat templates for
+        # TTS, so swallow any extra kwargs to stay forward-compatible.
         super().__init__(tokenizer=tokenizer)
         self.audio_start_id     = tokenizer.convert_tokens_to_ids("<|audio_start|>")
         self.reference_start_id = tokenizer.convert_tokens_to_ids("<|reference_start|>")

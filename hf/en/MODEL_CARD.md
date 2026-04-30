@@ -178,15 +178,6 @@ audio codec, open weights, simple PyTorch checkpoints, reproducible training rec
   year   = {2026},
   url    = {https://github.com/shangeth/wren}
 }
-
-@inproceedings{koizumi2023libritts,
-  title     = {LibriTTS-R: A Restored Multi-Speaker Text-to-Speech Corpus},
-  author    = {Koizumi, Yuma and Zen, Heiga and Karita, Shigeki and Ding, Yifan
-               and Yatabe, Kohei and Morioka, Nobuyuki and Bacchiani, Michiel and
-               Zhang, Yu and Han, Wei and Bapna, Ankur},
-  booktitle = {Interspeech},
-  year      = {2023}
-}
 ```
 
 ## License

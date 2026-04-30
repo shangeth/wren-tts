@@ -11,11 +11,15 @@ text → tokenizer → LLM backbone → k Mimi-code heads → Mimi decoder → 2
 
 ## Released
 
-**Model:** [shangeth/Wren-TTS-360M-v1](https://huggingface.co/shangeth/Wren-TTS-360M-v1) —
-SmolLM2-360M backbone, trained on LibriTTS-R train-clean-{100,360} + train-other-500.
-Multispeaker — requires a reference audio clip at inference for voice conditioning.
+**[shangeth/Wren-TTS-360M-v1](https://huggingface.co/shangeth/Wren-TTS-360M-v1)** —
+SmolLM2-360M backbone, English. Trained on VCTK + Jenny + LibriTTS-R + LJSpeech.
 
-**In progress:** v1.1 — fine-tune of v1 with broader speaker coverage (VCTK, Jenny added; LibriTTS-R/LJSpeech replayed at 10%/epoch).
+**[shangeth/Wren-TTS-0.5B-multi](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi)** —
+Qwen2.5-0.5B backbone, **8 languages** (en · de · fr · es · nl · it · pl · pt).
+Trained on the v1 English mix + 7-language MLS (~1.87M utterances total).
+[Demo Space](https://huggingface.co/spaces/shangeth/wren-tts-multi-demo).
+
+Both are multispeaker-only — a reference audio clip is required at inference.
 
 ## Quickstart — inference
 
@@ -84,11 +88,15 @@ Training streams Mimi-encoded codes from a HuggingFace dataset repo — no local
 Recommended path: launch from a YAML in `experiments/`:
 
 ```bash
-# v1: from-scratch on LibriTTS-R (~22 h on A100-40GB)
-python train.py --config experiments/wren-tts-360m-v1.yaml
+# v2 (English): SmolLM2-360M, full English mix from scratch
+python train.py --config experiments/wren-tts-360m-v2.yaml
 
-# v1.1: fine-tune of v1 — adds VCTK + Jenny, replays LibriTTS-R/LJSpeech at 10%/epoch
-python train.py --config experiments/wren-tts-360m-v1.1.yaml
+# v2-multi (multilingual): Qwen2.5-0.5B + English mix + 7-lang MLS
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python train.py --config experiments/wren-tts-qwen-v2-multilingual.yaml
+
+# Smoke test (all 5 datasets, ~12 train steps, exercises wandb + audio logging)
+python train.py --config experiments/test.yaml
 ```
 
 Key flags (from `Config` defaults):
@@ -202,17 +210,25 @@ python inference.py \
 
 ## Publishing to HuggingFace
 
+`hf/` is split per variant — `hf/en/` for the English release and `hf/multi/` for the
+multilingual one. Each contains its own `push.py`, `MODEL_CARD.md`, remote-code files,
+and a Gradio `space/` so the two are fully self-contained.
+
 ```bash
-export HF_TOKEN=hf_...
-python hf/push.py \
-  --repo_id shangeth/Wren-TTS-360M-v1 \
-  --checkpoint checkpoints/best.pt \
-  --private
+huggingface-cli login
+
+# English variant (Wren-TTS-360M-v1)
+python hf/en/push.py --repo_id shangeth/Wren-TTS-360M-v1 --checkpoint checkpoints/best.pt
+
+# Multilingual variant (Wren-TTS-0.5B-multi) — defaults baked in
+python hf/multi/push.py
+python hf/multi/push_space.py --space_id shangeth/wren-tts-multi-demo
 ```
 
-`hf/push.py` converts a training checkpoint into a transformers-compatible layout:
+Each `push.py` converts a training checkpoint into a transformers-compatible layout:
 `model.safetensors` + `config.json` (with `auto_map`) + tokenizer + `processor_config.json`
-+ the three `trust_remote_code` files in [hf/](hf/).
++ the three `trust_remote_code` files. `push_space.py` (multi only for now) uploads
+the Gradio demo to a Spaces repo.
 
 ## Repository layout
 
@@ -228,27 +244,38 @@ python hf/push.py \
 ├── metrics.py         metric classes (WER, CER, UTMOS, SECS, EER)
 ├── mimi.py            MimiCodec wrapper (inference-time decode only)
 ├── experiments/       per-run YAML configs (see experiments/README.md)
-└── hf/                HuggingFace model publishing
-    ├── push.py        checkpoint → HF repo
-    ├── MODEL_CARD.md  uploaded as README.md on the Hub
-    ├── configuration_wren.py
-    ├── modeling_wren.py
-    └── processing_wren.py
+└── hf/                HuggingFace model publishing — one self-contained subfolder per variant
+    ├── en/            English variant (Wren-TTS-360M-v1, SmolLM2 backbone)
+    │   ├── push.py
+    │   ├── MODEL_CARD.md
+    │   ├── configuration_wren.py / modeling_wren.py / processing_wren.py
+    │   └── space/     Gradio demo
+    └── multi/         Multilingual variant (Wren-TTS-0.5B-multi, Qwen2.5 backbone, 8 langs)
+        ├── push.py
+        ├── push_space.py
+        ├── MODEL_CARD.md
+        ├── configuration_wren.py / modeling_wren.py / processing_wren.py
+        └── space/     Gradio demo with multilingual examples
 ```
 
 ## Related
 
-- [wren-datasets](https://github.com/shangeth/wren-datasets) — Mimi-code
-  extraction + publishing for LJSpeech and LibriSpeech.
+- [wren-datasets](https://github.com/shangeth/wren-datasets) — Mimi-code extraction +
+  publishing for LJSpeech, LibriSpeech, LibriTTS-R, HiFi-TTS, VCTK, Jenny, Expresso,
+  and 7-language Multilingual LibriSpeech (MLS).
 
 ## Known issues
 
 - **EOS hallucination:** occasionally generates plausible speech *past* the input
   text. Mitigations at inference: raise `eos_bias` (e.g. 2–6), lower `max_audio_frames`,
-  lower `temperature`. Reduced (not eliminated) in v1 by `eos_loss_weight=50` during training.
+  lower `temperature`. Reduced (not eliminated) by `eos_loss_weight=50` during training.
 - **cb0 overfits earlier than cb3–cb7** — coarse semantic codebook is over-pressured
-  in v1 (cb0 weight 2×). Addressed in v1.1 with uniform per-codebook weights.
-- **English only**, audiobook-style prosody inherited from LibriTTS-R / LJSpeech.
+  in v1 (cb0 weight 2×). Addressed from v2 onward with uniform per-codebook weights.
+- **Audiobook-style prosody** inherited from LibriTTS-R / LJSpeech / MLS (LibriVox-derived);
+  not as expressive as conversational TTS.
+- **Multilingual coverage limited to the 8 trained languages** (en/de/fr/es/nl/it/pl/pt) —
+  per-language quality varies with training-data volume (German/Dutch/French strongest;
+  Polish/Portuguese/Italian have less data and may sound less natural).
 
 ## Citation
 
