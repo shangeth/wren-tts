@@ -62,6 +62,10 @@ class Config:
 
     # --- Training ---
     epochs:                int   = 50
+    # Early-stopping on val/loss. 0 disables (run all `epochs`). With val_patience=N,
+    # training stops after N consecutive epochs without a strict improvement in
+    # val/loss. Best checkpoint (`best.pt`) is preserved regardless.
+    val_patience:          int   = 0
     grad_clip:             float = 1.0
     use_amp:               bool  = True
     device:                str   = "cuda" if torch.cuda.is_available() else "cpu"

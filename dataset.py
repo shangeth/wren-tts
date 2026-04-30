@@ -215,16 +215,27 @@ class HFMimiDataset(Dataset):
         kept_rows = list(np.where(kept_mask)[0])
 
         # --- Speaker index (only over kept rows) ---
-        # On large mixes (1M+ rows) the Python dict-build loop is silent for ~15-30s
-        # without progress; tqdm wrap makes it legible.
+        # Vectorized via pandas groupby. The naive Python loop hit ~200 rows/sec
+        # because hf_dataset["speaker_id"] returns a lazy Arrow accessor on
+        # concatenated datasets — every speakers_col[row_idx] walked chunks.
+        # Materializing to numpy once + pandas groupby drops 2h+ on 1.5M rows
+        # to ~1s.
         speaker_to_indices: dict = {}
         if self.has_speakers:
-            logger.info("  loading speaker_id column...")
-            speakers_col = hf_dataset["speaker_id"]
-            for local_idx, row_idx in tqdm(
-                enumerate(kept_rows), total=len(kept_rows), desc="  speaker index",
-            ):
-                speaker_to_indices.setdefault(speakers_col[row_idx], []).append(local_idx)
+            logger.info("  building speaker index (vectorized)...")
+            import pandas as pd
+            kept_idx_arr  = np.asarray(kept_rows)
+            speakers_all  = np.asarray(hf_dataset["speaker_id"])  # one materialization
+            kept_speakers = speakers_all[kept_idx_arr]
+            df = pd.DataFrame({
+                "local":   np.arange(len(kept_rows), dtype=np.int64),
+                "speaker": kept_speakers,
+            })
+            speaker_to_indices = (
+                df.groupby("speaker", sort=False)["local"]
+                  .apply(list)
+                  .to_dict()
+            )
 
         self.indices             = kept_rows
         self._speaker_to_indices = speaker_to_indices

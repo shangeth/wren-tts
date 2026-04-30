@@ -120,10 +120,11 @@ class Trainer:
         _scaler_enabled = config.use_amp and not _use_bf16
         self.scaler = GradScaler(self._device_type, enabled=_scaler_enabled)
 
-        self.start_epoch   = 0
-        self.global_step   = 0
-        self.best_val_loss = float("inf")
-        self._log_samples  = None  # fixed val examples for audio logging, built lazily
+        self.start_epoch        = 0
+        self.global_step        = 0
+        self.best_val_loss      = float("inf")
+        self._epochs_no_improve = 0
+        self._log_samples       = None  # fixed val examples for audio logging, built lazily
 
         self.checkpoint_dir = Path(config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -170,15 +171,27 @@ class Trainer:
 
             is_best = val_losses["loss"] < self.best_val_loss
             if is_best:
-                self.best_val_loss = val_losses["loss"]
+                self.best_val_loss      = val_losses["loss"]
+                self._epochs_no_improve = 0
+            else:
+                self._epochs_no_improve += 1
             self._save_checkpoint(epoch, is_best=is_best)
 
             logger.info(
                 f"Epoch {epoch:04d} | "
                 f"train_loss={train_losses['loss']:.4f} "
                 f"val_loss={val_losses['loss']:.4f}"
-                + (" [BEST]" if is_best else "")
+                + (" [BEST]" if is_best else f" (no improve x{self._epochs_no_improve})")
             )
+
+            patience = getattr(self.config, "val_patience", 0)
+            if patience > 0 and self._epochs_no_improve >= patience:
+                logger.info(
+                    f"Early stopping at epoch {epoch:04d}: val/loss did not improve "
+                    f"for {self._epochs_no_improve} consecutive evals "
+                    f"(patience={patience}). Best val_loss={self.best_val_loss:.4f}."
+                )
+                break
 
         if self._run_logger:
             self._run_logger.close()
