@@ -46,6 +46,13 @@ Supports **8 languages**: English, German, French, Spanish, Dutch, Italian, Poli
 For an English-only sibling on the same architecture, see
 [shangeth/Wren-TTS-0.5B-v1](https://huggingface.co/shangeth/Wren-TTS-0.5B-v1) (when published).
 
+## Links
+
+- **Training & inference code:** [github.com/shangeth/wren-tts](https://github.com/shangeth/wren-tts)
+- **Wren research project:** [github.com/shangeth/wren](https://github.com/shangeth/wren)
+- **Dataset extraction (Mimi codes):** [github.com/shangeth/wren-datasets](https://github.com/shangeth/wren-datasets)
+- **Demo Space:** [huggingface.co/spaces/shangeth/wren-tts-multi-demo](https://huggingface.co/spaces/shangeth/wren-tts-multi-demo)
+
 ## Why Qwen2.5-0.5B for multilingual?
 
 The earlier [Wren-TTS-360M-v1](https://huggingface.co/shangeth/Wren-TTS-360M-v1) used

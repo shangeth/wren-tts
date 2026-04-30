@@ -30,6 +30,13 @@ backbone, then decodes to 24 kHz waveform with the Mimi decoder.
 
 An open research checkpoint — useful for experimentation, not production.
 
+## Links
+
+- **Training & inference code:** [github.com/shangeth/wren-tts](https://github.com/shangeth/wren-tts)
+- **Wren research project:** [github.com/shangeth/wren](https://github.com/shangeth/wren)
+- **Dataset extraction (Mimi codes):** [github.com/shangeth/wren-datasets](https://github.com/shangeth/wren-datasets)
+- **Demo Space:** [huggingface.co/spaces/shangeth/wren-tts-demo](https://huggingface.co/spaces/shangeth/wren-tts-demo)
+
 ## Architecture
 
 ```
