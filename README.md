@@ -13,13 +13,21 @@ text → tokenizer → LLM backbone → k Mimi-code heads → Mimi decoder → 2
 
 **[shangeth/Wren-TTS-360M-v1](https://huggingface.co/shangeth/Wren-TTS-360M-v1)** —
 SmolLM2-360M backbone, English. Trained on VCTK + Jenny + LibriTTS-R + LJSpeech.
+[Demo Space](https://huggingface.co/spaces/shangeth/wren-tts-demo).
 
 **[shangeth/Wren-TTS-0.5B-multi](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi)** —
 Qwen2.5-0.5B backbone, **8 languages** (en · de · fr · es · nl · it · pl · pt).
 Trained on the v1 English mix + 7-language MLS (~1.87M utterances total).
 [Demo Space](https://huggingface.co/spaces/shangeth/wren-tts-multi-demo).
 
-Both are multispeaker-only — a reference audio clip is required at inference.
+**[shangeth/Wren-TTS-0.5B-multi-expressive](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi-expressive)** —
+fine-tune of `Wren-TTS-0.5B-multi` on style-tagged Expresso. Adds **23 expressive
+style tags** (e.g. `<happy>`, `<sad>`, `<whisper>`, `<sarcastic>`) while retaining
+the 8-language voice-cloning capability via small-fraction multilingual replay.
+CC-BY-NC-4.0 (inherited from Expresso).
+[Demo Space](https://huggingface.co/spaces/shangeth/Wren-TTS-0.5B-multi-expressive).
+
+All three are multispeaker-only — a reference audio clip is required at inference.
 
 ## Quickstart — inference
 
@@ -210,9 +218,10 @@ python inference.py \
 
 ## Publishing to HuggingFace
 
-`hf/` is split per variant — `hf/en/` for the English release and `hf/multi/` for the
-multilingual one. Each contains its own `push.py`, `MODEL_CARD.md`, remote-code files,
-and a Gradio `space/` so the two are fully self-contained.
+`hf/` is split per variant — `hf/en/` for the English release, `hf/multi/` for the
+multilingual one, and `hf/expressive/` for the style-tagged fine-tune. Each contains
+its own `push.py`, `MODEL_CARD.md`, remote-code files, and a Gradio `space/` so the
+three are fully self-contained.
 
 ```bash
 huggingface-cli login
@@ -223,12 +232,16 @@ python hf/en/push.py --repo_id shangeth/Wren-TTS-360M-v1 --checkpoint checkpoint
 # Multilingual variant (Wren-TTS-0.5B-multi) — defaults baked in
 python hf/multi/push.py
 python hf/multi/push_space.py --space_id shangeth/wren-tts-multi-demo
+
+# Expressive variant (Wren-TTS-0.5B-multi-expressive) — defaults baked in
+python hf/expressive/push.py
+python hf/expressive/push_space.py
 ```
 
 Each `push.py` converts a training checkpoint into a transformers-compatible layout:
 `model.safetensors` + `config.json` (with `auto_map`) + tokenizer + `processor_config.json`
-+ the three `trust_remote_code` files. `push_space.py` (multi only for now) uploads
-the Gradio demo to a Spaces repo.
++ the three `trust_remote_code` files. `push_space.py` uploads the Gradio demo to a
+Spaces repo.
 
 ## Repository layout
 
@@ -250,12 +263,18 @@ the Gradio demo to a Spaces repo.
     │   ├── MODEL_CARD.md
     │   ├── configuration_wren.py / modeling_wren.py / processing_wren.py
     │   └── space/     Gradio demo
-    └── multi/         Multilingual variant (Wren-TTS-0.5B-multi, Qwen2.5 backbone, 8 langs)
+    ├── multi/         Multilingual variant (Wren-TTS-0.5B-multi, Qwen2.5 backbone, 8 langs)
+    │   ├── push.py
+    │   ├── push_space.py
+    │   ├── MODEL_CARD.md
+    │   ├── configuration_wren.py / modeling_wren.py / processing_wren.py
+    │   └── space/     Gradio demo with multilingual examples
+    └── expressive/    Expressive fine-tune (Wren-TTS-0.5B-multi-expressive, 23 style tags)
         ├── push.py
         ├── push_space.py
         ├── MODEL_CARD.md
         ├── configuration_wren.py / modeling_wren.py / processing_wren.py
-        └── space/     Gradio demo with multilingual examples
+        └── space/     Gradio demo with style-tag dropdown
 ```
 
 ## Related
@@ -272,10 +291,14 @@ the Gradio demo to a Spaces repo.
 - **cb0 overfits earlier than cb3–cb7** — coarse semantic codebook is over-pressured
   in v1 (cb0 weight 2×). Addressed from v2 onward with uniform per-codebook weights.
 - **Audiobook-style prosody** inherited from LibriTTS-R / LJSpeech / MLS (LibriVox-derived);
-  not as expressive as conversational TTS.
+  not as expressive as conversational TTS. The expressive fine-tune partially addresses
+  this for tagged English; untagged generation still inherits the base prosody.
 - **Multilingual coverage limited to the 8 trained languages** (en/de/fr/es/nl/it/pl/pt) —
   per-language quality varies with training-data volume (German/Dutch/French strongest;
   Polish/Portuguese/Italian have less data and may sound less natural).
+- **Expressive style tags are English-only** in `Wren-TTS-0.5B-multi-expressive` —
+  training only paired tags with English text, so behaviour with multilingual prompts
+  is undefined.
 
 ## Citation
 

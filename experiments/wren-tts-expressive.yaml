@@ -1,0 +1,140 @@
+# Wren-TTS Expressive — fine-tune from Wren-TTS-0.5B-multi for style-tagged TTS.
+#
+# Goal: teach the existing multilingual Qwen2.5-0.5B model to produce 19
+# expressive styles via inline tags (`<happy>`, `<sad>`, `<whisper>`, …) while
+# preserving its multilingual + speaker-cloning ability.
+#
+# Data mix per epoch (~50/50 Expresso vs other):
+#   - shangeth/expresso-mimi-codes-tagged  weight=1.0    full pass (~26k rows)
+#   - 5 pretraining datasets               weight=0.004  ~26k rows total resampled per epoch
+#                                                        (different rows each epoch
+#                                                         via EpochStratifiedSampler)
+#   Net per-epoch: ~52k rows ≈ ~2200 batches @ bs=24 ≈ ~30 min train + ~10 min val
+#                  → 20 epochs ≈ ~10 hours wall time on A100.
+#                  MLS dominates the "other" share (~24k of the 26k) — protects
+#                  multilingual ability via heavy resampled exposure.
+#
+# Tag convention (baked into text by expresso_tagged.py):
+#   EMOTIONAL    <happy> <sad> <angry> <fearful> <disgusted>
+#                <awe> <desire> <calm> <sympathetic>
+#   DELIVERY     <laughing> <enunciated> <whisper> <fast> <projected>
+#   PERFORMANCE  <confused> <sarcastic> <narration>
+#   STATE        <bored> <sleepy>
+#   default rows are left untagged → model learns "no tag = default voice".
+#
+# Reference encoder is unchanged: trainer's multispeaker ref-picker samples a
+# random utterance from the SAME speaker_id (any style), so the reference carries
+# speaker identity only — style is conveyed entirely via the text tag.
+#
+# Val: full Expresso dev (~80 min) + LibriTTS-R dev_clean (~5h) + MLS dev (~10h).
+# Single metric: val/loss. Watch for divergence between Expresso loss (should
+# drop) and MLS / LibriTTS loss (should not regress) — break out per-source
+# val_loss in trainer logging if available.
+
+hf_datasets:
+  - shangeth/expresso-mimi-codes-tagged
+  - shangeth/mls-mimi-codes
+  - shangeth/libritts-r-mimi-codes
+  - shangeth/vctk-mimi-codes
+  - shangeth/jenny-mimi-codes
+  - shangeth/ljspeech-mimi-codes
+
+hf_splits:
+  - train
+  - train
+  - train_clean_100,train_clean_360,train_other_500
+  - train
+  - train
+  - train
+
+# Weights tuned for balanced per-VOICE exposure (not just total rows).
+# Stratified sampler does max(1, round(n_rows_per_speaker * w)) per speaker; with a
+# uniform weight, single-speaker datasets get 50-100 rows/epoch of the SAME voice
+# (Jenny, LJSpeech) while multi-speaker datasets get clamped to floor=1/voice.
+#
+# Per-dataset rationale:
+#   expresso       1.0     — full pass, ~26k rows (the new domain)
+#   mls            0.004   — ~24k rows, ~24 rows/voice avg. Multilingual replay,
+#                            highest catastrophic-forgetting risk → most coverage.
+#   libritts-r     0.005   — ~2.4k rows, ~1 row/voice (most speakers at floor).
+#                            Diverse English speaker breadth.
+#   vctk           0.05    — ~2.2k rows, ~20 rows × 109 speakers. Accent diversity.
+#   jenny          0.0001  — ~2 rows of Jenny's single voice. Just enough to keep
+#                            the model from forgetting it; not 84× exposure per epoch.
+#   ljspeech       0.0002  — ~3 rows of LJSpeech's single voice. Same reasoning.
+#
+# Net per-epoch ≈ 26k Expresso + ~28.6k other ≈ 54.6k rows ≈ 2300 batches @ bs=24.
+hf_weights:        [1.0, 0.004, 0.005, 0.05, 0.0001, 0.0002]
+hf_val_from_train: [0.0, 0.0,   0.0,   0.0,  0.0,    0.0]
+
+hf_val_datasets:
+  - shangeth/expresso-mimi-codes-tagged
+  - shangeth/libritts-r-mimi-codes
+  - shangeth/mls-mimi-codes
+hf_val_splits:
+  - dev
+  - dev_clean
+  - validation
+
+# --- LLM backbone (must match base checkpoint) ---
+llm_name: Qwen/Qwen2.5-0.5B
+use_lora: false
+
+# --- Mimi codec ---
+# k=8 to match the base Wren-TTS-0.5B-multi checkpoint. The Expresso codes are
+# stored with all 32 codebooks; the dataset class slices `codes[:k]` automatically.
+k_codebooks:     8
+codebook_size:   2048
+mimi_model_name: kyutai/mimi
+
+# --- Architecture / loss ---
+# eos_loss_weight reduced from pretrain's 50.0 → 10.0:
+# the base model has already converged on EOS prediction (50× compensated for
+# the 1-EOS-per-N-frames class imbalance during pretraining). Continuing at 50×
+# during fine-tune sinks capacity into something already correct; lowering to 10
+# redirects gradient toward the new style/code learning while keeping EOS
+# supervised enough to handle Expresso's unusual endings (whispered trail-offs,
+# laughing fade-outs).
+cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+multispeaker:    true
+eos_loss_weight: 100.0
+
+# --- Sequence sizing ---
+# +20 over v2-multi (200) to absorb the new <style> tag tokens cleanly.
+max_text_tokens:  220
+max_audio_frames: 300
+max_ref_frames:   150
+
+# --- Batch (A100-40GB) ---
+batch_size:       24
+grad_accum_steps: 1
+
+# --- DataLoader ---
+num_workers:     4
+pin_memory:      true
+prefetch_factor: 2
+
+# --- Resume from pretrained checkpoint ---
+# Path to the local .pt checkpoint of shangeth/Wren-TTS-0.5B-multi.
+# (The trainer's resume_from expects a state-dict checkpoint, not an HF model card.)
+resume_from:     checkpoints/v2-multilingual/best.pt
+reset_optimizer: true        # fresh optimizer state — fine-tune is a new objective
+lr:              1.0e-5      # 10× lower than pretrain; preserves multilingual ability
+weight_decay:    0.01
+betas:           [0.9, 0.95]
+lr_warmup_steps: 2000        # gentle entry; previous model is already converged
+lr_decay_steps:  10000       # auto-extended by trainer to ~epochs × steps_per_epoch
+epochs:          20          # upper bound; val_patience early-stops
+val_patience:    2           # stop after 2 consecutive epochs without val/loss improvement
+
+grad_clip: 1.0
+use_amp:   true
+
+# --- Logging ---
+log_audio_every: 1000
+checkpoint_dir:  checkpoints/expressive
+log_dir:         runs/expressive
+logger:          wandb
+wandb_project:   wren
+wandb_run_name:  wren-tts-expressive
+keep_last_n:     3

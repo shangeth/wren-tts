@@ -455,23 +455,34 @@ class EpochStratifiedSampler(torch.utils.data.Sampler):
 
         # Build per-source, per-speaker LOCAL-index mapping.
         # local_idx i ↔ raw row dataset.indices[i]; we need source assignment + speaker for that row.
-        # `dataset.ds["speaker_id"]` reads the column for ALL raw rows once (fast for our sizes).
-        speaker_col = dataset.ds["speaker_id"]
-        source_of_row = [None] * (max(end for _, end, _ in source_meta) if source_meta else 0)
+        # CRITICAL: materialize speaker column once. dataset.ds["speaker_id"] on a concatenated
+        # HF dataset returns a lazy Arrow accessor — per-access walks chunks (~200 rows/sec).
+        # On 1M+ rows this loop takes hours. np.asarray() materializes once → ms.
+        import numpy as np
+        speaker_col = np.asarray(dataset.ds["speaker_id"])
+        n_rows = max(end for _, end, _ in source_meta) if source_meta else 0
+        source_of_row = np.full(n_rows, -1, dtype=np.int32)
         for src_i, (s, e, _) in enumerate(source_meta):
-            for r in range(s, e):
-                source_of_row[r] = src_i
+            source_of_row[s:e] = src_i
 
         # per_source_buckets[src_i] = {speaker_id: [local_idx, local_idx, ...]}
         self.per_source_buckets: List[dict] = [dict() for _ in source_meta]
         self.weights: List[float] = [w for _, _, w in source_meta]
 
-        for local_idx, raw_row in enumerate(dataset.indices):
-            src_i = source_of_row[raw_row]
-            if src_i is None:
-                continue  # row not in any tracked source (shouldn't happen)
-            sp = speaker_col[raw_row]
-            self.per_source_buckets[src_i].setdefault(sp, []).append(local_idx)
+        # Vectorized bucketing via pandas groupby — same trick HFMimiDataset uses (see line 220).
+        # Drops a 2h Python loop on 1.9M rows down to ~1s.
+        import pandas as pd
+        indices_arr   = np.asarray(dataset.indices)
+        local_sources = source_of_row[indices_arr]
+        local_speakers = speaker_col[indices_arr]
+        df = pd.DataFrame({
+            "local":   np.arange(len(indices_arr), dtype=np.int64),
+            "source":  local_sources,
+            "speaker": local_speakers,
+        })
+        df = df[df["source"] >= 0]
+        for (src_i, sp), grp in df.groupby(["source", "speaker"], sort=False):
+            self.per_source_buckets[int(src_i)][sp] = grp["local"].tolist()
 
         # Approximate length once (per-epoch length will fluctuate by ±1 per speaker due to rounding).
         self._length = sum(self._target_per_source(i) for i in range(len(source_meta)))
