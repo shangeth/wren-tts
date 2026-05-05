@@ -15,7 +15,7 @@ a `AutoModel.from_pretrained` / `AutoProcessor.from_pretrained` layout:
 Usage (multilingual variant):
   huggingface-cli login
   python hf/multi/push.py                                                    # uses defaults below
-  python hf/multi/push.py --checkpoint checkpoints/v2-multilingual/best.pt --private
+  python hf/multi/push.py --checkpoint checkpoints/multi/best.pt --private
 
 Dry-run (build the staging directory locally without uploading):
   python hf/multi/push.py --local_dir ./staged_multi
@@ -137,7 +137,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo_id",        default="shangeth/Wren-TTS-0.5B-multi",
                         help="<user_or_org>/<model_name>")
-    parser.add_argument("--checkpoint",     default="checkpoints/v2-multilingual/best.pt")
+    parser.add_argument("--checkpoint",     default="checkpoints/multi/best.pt")
     parser.add_argument("--private",        action="store_true")
     parser.add_argument("--commit_message", default="Upload Wren-TTS-0.5B-multi checkpoint")
     parser.add_argument("--token",          default=None,

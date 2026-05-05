@@ -12,13 +12,13 @@ a `AutoModel.from_pretrained` / `AutoProcessor.from_pretrained` layout:
   - processing_wren.py           (remote code)
   - README.md                    (model card)
 
-Usage:
+Usage (English variant):
   huggingface-cli login
-  python hf/push.py --repo_id shangeth/Wren-TTS-360M-v1 --checkpoint checkpoints/best.pt
-  python hf/push.py --repo_id shangeth/Wren-TTS-360M-v1 --checkpoint checkpoints/best.pt --private
+  python hf/en/push.py                                                          # uses defaults below
+  python hf/en/push.py --checkpoint checkpoints/en/best.pt --private
 
 Dry-run (build the staging directory locally without uploading):
-  python hf/push.py --repo_id shangeth/Wren-TTS-360M-v1 --local_dir ./staged
+  python hf/en/push.py --local_dir ./staged_en
 """
 
 import argparse
@@ -135,10 +135,11 @@ def convert_checkpoint_to_hf_repo(checkpoint_path: Path, staging: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo_id",        required=True, help="<user_or_org>/<model_name>")
-    parser.add_argument("--checkpoint",     default="checkpoints/best.pt")
+    parser.add_argument("--repo_id",        default="shangeth/Wren-TTS-360M-en",
+                        help="<user_or_org>/<model_name>")
+    parser.add_argument("--checkpoint",     default="checkpoints/en/best.pt")
     parser.add_argument("--private",        action="store_true")
-    parser.add_argument("--commit_message", default="Upload Wren checkpoint")
+    parser.add_argument("--commit_message", default="Upload Wren-TTS-360M-en checkpoint")
     parser.add_argument("--token",          default=None,
                         help="HF token; falls back to `huggingface-cli login` / HF_TOKEN env")
     parser.add_argument("--local_dir",      default=None,

@@ -1,5 +1,5 @@
 """
-Gradio demo for shangeth/Wren-TTS-360M-v1.
+Gradio demo for shangeth/Wren-TTS-360M-en.
 
 Voice-cloning TTS: user supplies text + a reference voice (bundled sample or upload),
 model generates 24 kHz speech in that voice.
@@ -46,7 +46,7 @@ def _save_wav(path: str, wav_tensor: torch.Tensor, sr: int):
         arr = arr.squeeze(0)                      # [1, T] -> [T]
     sf.write(str(path), arr, sr)
 
-MODEL_ID = "shangeth/Wren-TTS-360M-v1"
+MODEL_ID = "shangeth/Wren-TTS-360M-en"
 DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
 SR_OUT   = 24000
 
@@ -146,7 +146,7 @@ def synthesize(text, voice_label, uploaded_audio,
 # ----- UI -----
 
 DESCRIPTION = f"""
-# 🐦 Wren-TTS-360M v1
+# 🐦 Wren-TTS-360M-en
 
 Voice-cloning text-to-speech. A small (<3B) multimodal speech LLM —
 [SmolLM2-360M](https://huggingface.co/HuggingFaceTB/SmolLM2-360M) backbone +
@@ -156,10 +156,10 @@ Voice-cloning text-to-speech. A small (<3B) multimodal speech LLM —
 
 Running on **{DEVICE.upper()}**. On the free CPU-basic tier, expect **~30–90 s per short utterance**.
 
-- [Model](https://huggingface.co/shangeth/Wren-TTS-360M-v1) · [Code](https://github.com/shangeth/wren-tts)
+- [Model](https://huggingface.co/shangeth/Wren-TTS-360M-en) · [Code](https://github.com/shangeth/wren-tts)
 """
 
-with gr.Blocks(title="Wren-TTS-360M v1", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Wren-TTS-360M-en", theme=gr.themes.Soft()) as demo:
     gr.Markdown(DESCRIPTION)
 
     with gr.Row():

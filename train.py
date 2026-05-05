@@ -1,8 +1,9 @@
 """
 TTS training entry point.
 
-  python train.py --config experiments/wren-tts-360m-v1.yaml
-  python train.py --config experiments/ljspeech.yaml
+  python train.py --config experiments/en.yaml
+  python train.py --config experiments/multi.yaml
+  python train.py --config experiments/expressive.yaml
   python train.py --config my_config.yaml
   python train.py --llm_name HuggingFaceTB/SmolLM2-360M --k_codebooks 4 --batch_size 4
 """

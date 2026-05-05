@@ -12,13 +12,13 @@ a `AutoModel.from_pretrained` / `AutoProcessor.from_pretrained` layout:
   - processing_wren.py           (remote code)
   - README.md                    (model card)
 
-Usage (multilingual variant):
+Usage (expressive variant):
   huggingface-cli login
-  python hf/multi/push.py                                                    # uses defaults below
-  python hf/multi/push.py --checkpoint checkpoints/v2-multilingual/best.pt --private
+  python hf/expressive/push.py                                                # uses defaults below
+  python hf/expressive/push.py --checkpoint checkpoints/expressive/best.pt --private
 
 Dry-run (build the staging directory locally without uploading):
-  python hf/multi/push.py --local_dir ./staged_multi
+  python hf/expressive/push.py --local_dir ./staged_expressive
 """
 
 import argparse

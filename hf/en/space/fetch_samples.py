@@ -3,7 +3,7 @@ One-time fetcher for bundled reference clips.
 
 Grabs 3 short LibriTTS-R test-clean clips from distinct speakers and writes them
 to `samples/` next to app.py. LibriTTS-R is natively 24 kHz (matches Mimi) and
-test.clean is held out from v1 training. Run once locally before pushing the Space.
+test.clean is held out from training. Run once locally before pushing the Space.
 
   python fetch_samples.py
 """

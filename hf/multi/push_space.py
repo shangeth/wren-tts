@@ -21,7 +21,7 @@ from pathlib import Path
 HF_DIR    = Path(__file__).resolve().parent
 SPACE_DIR = HF_DIR / "space"
 
-DEFAULT_SPACE_ID = "shangeth/Wren-TTS-0.5B-multi-demo"
+DEFAULT_SPACE_ID = "shangeth/Wren-TTS-0.5B-multi-demo"  # repo type=space, separate from the model repo
 
 
 def main():

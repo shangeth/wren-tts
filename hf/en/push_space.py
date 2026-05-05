@@ -1,18 +1,18 @@
 """
-Push the Wren-TTS-0.5B-multi-expressive Gradio Space to the Hugging Face Hub.
+Push the Wren-TTS-360M-en Gradio Space to the Hugging Face Hub.
 
-Uploads the full hf/expressive/space/ folder (app.py, README.md, requirements.txt,
+Uploads the full hf/en/space/ folder (app.py, README.md, requirements.txt,
 fetch_samples.py, samples/) to a HF Space repo. Mirrors the model push.py
 flow but with repo_type="space".
 
 Prerequisite — bundled sample wavs must exist in space/samples/:
-  cd hf/expressive/space
+  cd hf/en/space
   python fetch_samples.py     # one-time
 
 Usage:
   huggingface-cli login
-  python hf/expressive/push_space.py                                # default Space repo
-  python hf/expressive/push_space.py --space_id <user>/<name> --private
+  python hf/en/push_space.py                                # default Space repo
+  python hf/en/push_space.py --space_id <user>/<name> --private
 """
 
 import argparse
@@ -21,7 +21,7 @@ from pathlib import Path
 HF_DIR    = Path(__file__).resolve().parent
 SPACE_DIR = HF_DIR / "space"
 
-DEFAULT_SPACE_ID = "shangeth/Wren-TTS-0.5B-multi-expressive-demo"
+DEFAULT_SPACE_ID = "shangeth/Wren-TTS-360M-en-demo"
 
 
 def main():
@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--space_id",       default=DEFAULT_SPACE_ID,
                         help="<user_or_org>/<space_name>  (default: %(default)s)")
     parser.add_argument("--private",        action="store_true")
-    parser.add_argument("--commit_message", default="Update Wren-TTS-0.5B-multi-expressive Gradio demo")
+    parser.add_argument("--commit_message", default="Update Wren-TTS-360M-en Gradio demo")
     parser.add_argument("--token",          default=None,
                         help="HF token; falls back to `huggingface-cli login` / HF_TOKEN env")
     args = parser.parse_args()

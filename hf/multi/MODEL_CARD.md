@@ -34,7 +34,7 @@ datasets:
 - reach-vb/jenny_tts_dataset
 ---
 
-# Wren-TTS-0.5B-v1-multi
+# Wren-TTS-0.5B-multi
 
 **Multilingual** speech LLM in the Wren series. Generates
 [Kyutai Mimi](https://huggingface.co/kyutai/mimi) neural-codec tokens from text using a
@@ -44,24 +44,26 @@ datasets:
 Supports **8 languages**: English, German, French, Spanish, Dutch, Italian, Polish, Portuguese.
 
 For an English-only sibling on the same architecture, see
-[shangeth/Wren-TTS-0.5B-v1](https://huggingface.co/shangeth/Wren-TTS-0.5B-v1) (when published).
+[shangeth/Wren-TTS-360M-en](https://huggingface.co/shangeth/Wren-TTS-360M-en).
+For expressive synthesis with style tags, see
+[shangeth/Wren-TTS-0.5B-multi-expressive](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi-expressive).
 
 ## Links
 
 - **Training & inference code:** [github.com/shangeth/wren-tts](https://github.com/shangeth/wren-tts)
 - **Wren research project:** [github.com/shangeth/wren](https://github.com/shangeth/wren)
 - **Dataset extraction (Mimi codes):** [github.com/shangeth/wren-datasets](https://github.com/shangeth/wren-datasets)
-- **Demo Space:** [huggingface.co/spaces/shangeth/wren-tts-multi-demo](https://huggingface.co/spaces/shangeth/wren-tts-multi-demo)
+- **Demo Space:** [huggingface.co/spaces/shangeth/Wren-TTS-0.5B-multi-demo](https://huggingface.co/spaces/shangeth/Wren-TTS-0.5B-multi-demo)
 
 ## Why Qwen2.5-0.5B for multilingual?
 
-The earlier [Wren-TTS-360M-v1](https://huggingface.co/shangeth/Wren-TTS-360M-v1) used
+The English variant [Wren-TTS-360M-en](https://huggingface.co/shangeth/Wren-TTS-360M-en) uses
 SmolLM2-360M, which was pretrained almost entirely on English text and tokenizes
 non-Latin / diacritic-heavy languages poorly (per-character explosion). Qwen2.5-0.5B
 ships a 151k-token multilingual vocabulary with efficient tokens for all 7 MLS languages.
 
-Architecture is otherwise identical to the 360M v1 — same delay-pattern Mimi prediction,
-same 8 codebooks, same multispeaker reference conditioning.
+Architecture is otherwise identical to the English variant — same delay-pattern Mimi
+prediction, same 8 codebooks, same multispeaker reference conditioning.
 
 ## Architecture
 
@@ -134,7 +136,7 @@ import numpy as np
 from datasets import load_dataset
 from transformers import AutoModel, AutoProcessor
 
-model_id = "shangeth/Wren-TTS-0.5B-v1-multi"
+model_id = "shangeth/Wren-TTS-0.5B-multi"
 device   = "cuda" if torch.cuda.is_available() else "cpu"
 
 processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)

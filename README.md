@@ -11,21 +11,21 @@ text → tokenizer → LLM backbone → k Mimi-code heads → Mimi decoder → 2
 
 ## Released
 
-**[shangeth/Wren-TTS-360M-v1](https://huggingface.co/shangeth/Wren-TTS-360M-v1)** —
+**[shangeth/Wren-TTS-360M-en](https://huggingface.co/shangeth/Wren-TTS-360M-en)** —
 SmolLM2-360M backbone, English. Trained on VCTK + Jenny + LibriTTS-R + LJSpeech.
-[Demo Space](https://huggingface.co/spaces/shangeth/wren-tts-demo).
+[Demo Space](https://huggingface.co/spaces/shangeth/Wren-TTS-360M-en-demo).
 
 **[shangeth/Wren-TTS-0.5B-multi](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi)** —
 Qwen2.5-0.5B backbone, **8 languages** (en · de · fr · es · nl · it · pl · pt).
-Trained on the v1 English mix + 7-language MLS (~1.87M utterances total).
-[Demo Space](https://huggingface.co/spaces/shangeth/wren-tts-multi-demo).
+Trained on the English mix + 7-language MLS (~1.87M utterances total).
+[Demo Space](https://huggingface.co/spaces/shangeth/Wren-TTS-0.5B-multi-demo).
 
 **[shangeth/Wren-TTS-0.5B-multi-expressive](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi-expressive)** —
 fine-tune of `Wren-TTS-0.5B-multi` on style-tagged Expresso. Adds **23 expressive
 style tags** (e.g. `<happy>`, `<sad>`, `<whisper>`, `<sarcastic>`) while retaining
 the 8-language voice-cloning capability via small-fraction multilingual replay.
 CC-BY-NC-4.0 (inherited from Expresso).
-[Demo Space](https://huggingface.co/spaces/shangeth/Wren-TTS-0.5B-multi-expressive).
+[Demo Space](https://huggingface.co/spaces/shangeth/Wren-TTS-0.5B-multi-expressive-demo).
 
 All three are multispeaker-only — a reference audio clip is required at inference.
 
@@ -43,7 +43,7 @@ import numpy as np
 from datasets import load_dataset
 from transformers import AutoModel, AutoProcessor
 
-model_id  = "shangeth/Wren-TTS-360M-v1"
+model_id  = "shangeth/Wren-TTS-360M-en"
 device    = "cuda" if torch.cuda.is_available() else "cpu"
 processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 model     = AutoModel.from_pretrained(model_id, trust_remote_code=True).to(device).eval()
@@ -67,7 +67,7 @@ waveform = model.generate(
 processor.save_audio(waveform, "out.wav")
 ```
 
-Sampling tips + more usage: see the [model card](https://huggingface.co/shangeth/Wren-TTS-360M-v1).
+Sampling tips + more usage: see the [model card](https://huggingface.co/shangeth/Wren-TTS-360M-en).
 
 ## Architecture
 
@@ -96,12 +96,15 @@ Training streams Mimi-encoded codes from a HuggingFace dataset repo — no local
 Recommended path: launch from a YAML in `experiments/`:
 
 ```bash
-# v2 (English): SmolLM2-360M, full English mix from scratch
-python train.py --config experiments/wren-tts-360m-v2.yaml
+# English: SmolLM2-360M, full English mix from scratch
+python train.py --config experiments/en.yaml
 
-# v2-multi (multilingual): Qwen2.5-0.5B + English mix + 7-lang MLS
+# Multilingual: Qwen2.5-0.5B + English mix + 7-lang MLS
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python train.py --config experiments/wren-tts-qwen-v2-multilingual.yaml
+  python train.py --config experiments/multi.yaml
+
+# Expressive: fine-tune of multi on style-tagged Expresso (23 tags)
+python train.py --config experiments/expressive.yaml
 
 # Smoke test (all 5 datasets, ~12 train steps, exercises wandb + audio logging)
 python train.py --config experiments/test.yaml
@@ -226,12 +229,12 @@ three are fully self-contained.
 ```bash
 huggingface-cli login
 
-# English variant (Wren-TTS-360M-v1)
-python hf/en/push.py --repo_id shangeth/Wren-TTS-360M-v1 --checkpoint checkpoints/best.pt
+# English variant (Wren-TTS-360M-en)
+python hf/en/push.py --repo_id shangeth/Wren-TTS-360M-en --checkpoint checkpoints/en/best.pt
 
 # Multilingual variant (Wren-TTS-0.5B-multi) — defaults baked in
 python hf/multi/push.py
-python hf/multi/push_space.py --space_id shangeth/wren-tts-multi-demo
+python hf/multi/push_space.py
 
 # Expressive variant (Wren-TTS-0.5B-multi-expressive) — defaults baked in
 python hf/expressive/push.py
@@ -258,7 +261,7 @@ Spaces repo.
 ├── mimi.py            MimiCodec wrapper (inference-time decode only)
 ├── experiments/       per-run YAML configs (see experiments/README.md)
 └── hf/                HuggingFace model publishing — one self-contained subfolder per variant
-    ├── en/            English variant (Wren-TTS-360M-v1, SmolLM2 backbone)
+    ├── en/            English variant (Wren-TTS-360M-en, SmolLM2 backbone)
     │   ├── push.py
     │   ├── MODEL_CARD.md
     │   ├── configuration_wren.py / modeling_wren.py / processing_wren.py
@@ -288,8 +291,9 @@ Spaces repo.
 - **EOS hallucination:** occasionally generates plausible speech *past* the input
   text. Mitigations at inference: raise `eos_bias` (e.g. 2–6), lower `max_audio_frames`,
   lower `temperature`. Reduced (not eliminated) by `eos_loss_weight=50` during training.
-- **cb0 overfits earlier than cb3–cb7** — coarse semantic codebook is over-pressured
-  in v1 (cb0 weight 2×). Addressed from v2 onward with uniform per-codebook weights.
+- **cb0 overfits earlier than cb3–cb7** — coarse semantic codebook was over-pressured
+  in earlier recipes (cb0 weight 2×). Addressed by uniform per-codebook weights in
+  the released `en`/`multi`/`expressive` recipes.
 - **Audiobook-style prosody** inherited from LibriTTS-R / LJSpeech / MLS (LibriVox-derived);
   not as expressive as conversational TTS. The expressive fine-tune partially addresses
   this for tagged English; untagged generation still inherits the base prosody.

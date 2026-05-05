@@ -20,13 +20,18 @@ datasets:
 - reach-vb/jenny_tts_dataset
 ---
 
-# Wren-TTS-360M (v1)
+# Wren-TTS-360M-en
 
 **Wren** is a series of small (<3B) multimodal speech LLMs covering TTS, ASR, and
-speech-language modelling. **Wren-TTS-360M-v1** generates
+speech-language modelling. **Wren-TTS-360M-en** is the English variant — generates
 [Kyutai Mimi](https://huggingface.co/kyutai/mimi) neural-codec tokens from text
 using a [HuggingFaceTB/SmolLM2-360M](https://huggingface.co/HuggingFaceTB/SmolLM2-360M)
 backbone, then decodes to 24 kHz waveform with the Mimi decoder.
+
+For multilingual coverage (8 languages), see
+[shangeth/Wren-TTS-0.5B-multi](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi).
+For expressive synthesis with style tags, see
+[shangeth/Wren-TTS-0.5B-multi-expressive](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi-expressive).
 
 An open research checkpoint — useful for experimentation, not production.
 
@@ -35,7 +40,7 @@ An open research checkpoint — useful for experimentation, not production.
 - **Training & inference code:** [github.com/shangeth/wren-tts](https://github.com/shangeth/wren-tts)
 - **Wren research project:** [github.com/shangeth/wren](https://github.com/shangeth/wren)
 - **Dataset extraction (Mimi codes):** [github.com/shangeth/wren-datasets](https://github.com/shangeth/wren-datasets)
-- **Demo Space:** [huggingface.co/spaces/shangeth/wren-tts-demo](https://huggingface.co/spaces/shangeth/wren-tts-demo)
+- **Demo Space:** [huggingface.co/spaces/shangeth/Wren-TTS-360M-en-demo](https://huggingface.co/spaces/shangeth/Wren-TTS-360M-en-demo)
 
 ## Architecture
 
@@ -87,7 +92,7 @@ import numpy as np
 from datasets import load_dataset
 from transformers import AutoModel, AutoProcessor
 
-model_id = "shangeth/Wren-TTS-360M-v1"
+model_id = "shangeth/Wren-TTS-360M-en"
 device   = "cuda" if torch.cuda.is_available() else "cpu"
 
 processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
