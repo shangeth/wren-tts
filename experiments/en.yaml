@@ -1,4 +1,4 @@
-# Wren-TTS-360M v2 — from-scratch training on the full mix (no v1→v1.1 two-stage).
+# Wren-TTS-360M (English) — SmolLM2-360M, from-scratch training on the full English mix.
 #
 # Data mix (per epoch, after stratified sampling):
 #   - VCTK              100% every epoch  (~44k, 109 speakers, multiple accents)
@@ -34,7 +34,8 @@ hf_val_splits:   [dev_clean]
 
 # --- Architecture ---
 k_codebooks: 8
-# Uniform per-codebook weights — avoids v1's cb0-overfit pattern (cb0 was 2× in v1).
+# Uniform per-codebook weights — avoids the cb0-overfit pattern from earlier recipes
+# (which weighted cb0 at 2×).
 cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 multispeaker:    true
 eos_loss_weight: 50.0
@@ -54,8 +55,8 @@ epochs:          30
 
 log_audio_every: 1000
 
-checkpoint_dir:  checkpoints/v2.1
-log_dir:         runs/v2.1
+checkpoint_dir:  checkpoints/en
+log_dir:         runs/en
 logger:          wandb
 wandb_project:   wren
-wandb_run_name:  wren-tts-360m-v2.1
+wandb_run_name:  wren-tts-en

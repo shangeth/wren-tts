@@ -10,18 +10,18 @@ re-runnable.
    `Config` fields). A variation file only needs to override what changes.
 2. **Run with `--config`:**
    ```bash
-   python train.py --config experiments/ljspeech.yaml
+   python train.py --config experiments/en.yaml
    ```
    CLI flags on top of `--config` still work and win:
    ```bash
-   python train.py --config experiments/ljspeech.yaml --batch_size 4
+   python train.py --config experiments/en.yaml --batch_size 4
    ```
 3. **Checkpoint traceability.** Every training run dumps the fully-resolved
    config (YAML + CLI overrides merged) as `config.yaml` into
    `cfg.checkpoint_dir` at startup. So you can always read the exact recipe a
    checkpoint was trained with:
    ```
-   checkpoints/ljspeech/
+   checkpoints/en/
      config.yaml     ← snapshot of what ran
      train.log
      best.pt
@@ -33,16 +33,13 @@ re-runnable.
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `base.yaml` | Full default config — reference for every available knob. Regenerated from `Config()` defaults; don't edit this, copy it. |
-| `librispeech.yaml` | Early recipe: SmolLM2-360M + LibriSpeech train-clean-{100,360}, k=3, multispeaker. |
-| `ljspeech.yaml` | Single-speaker LJSpeech run (mixed-case, no ref block). |
-| `wren-tts-360m-v1.yaml` | **English v1** released as `shangeth/Wren-TTS-360M-v1`: SmolLM2-360M, LibriTTS-R focus. |
-| `wren-tts-360m-v1.1.yaml` | Fine-tune of v1 — adds VCTK + Jenny, replays LibriTTS-R/LJSpeech at 10%/epoch. |
-| `wren-tts-360m-v2.yaml` | **English v2**: SmolLM2-360M from-scratch on the full English mix (VCTK + Jenny + LibriTTS-R + LJSpeech). |
-| `wren-tts-qwen-v2-multilingual.yaml` | **Multilingual v1** released as `shangeth/Wren-TTS-0.5B-multi`: Qwen2.5-0.5B + English mix + 7-lang MLS (~1.87M utterances). |
-| `test.yaml` | Smoke test — all 5 datasets sliced to ~16 rows each, ~12 train + ~4 val steps. Verifies model load + tokenizer + multilingual data path + wandb + audio logging in ~3-5 min. |
+| File | Purpose | Released as |
+|---|---|---|
+| `base.yaml` | Full default config — reference for every available knob. Regenerated from `Config()` defaults; don't edit this, copy it. | — |
+| `en.yaml` | **English** — SmolLM2-360M, from-scratch on VCTK + Jenny + LibriTTS-R + LJSpeech. | [`shangeth/Wren-TTS-360M-v1`](https://huggingface.co/shangeth/Wren-TTS-360M-v1) |
+| `multi.yaml` | **Multilingual** — Qwen2.5-0.5B, English mix + 7-lang MLS (~1.87M utterances, ~1.7 days on A100). | [`shangeth/Wren-TTS-0.5B-multi`](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi) |
+| `expressive.yaml` | **Expressive** fine-tune of `multi` on style-tagged Expresso (23 tags) + small-fraction multilingual replay. | [`shangeth/Wren-TTS-0.5B-multi-expressive`](https://huggingface.co/shangeth/Wren-TTS-0.5B-multi-expressive) |
+| `test.yaml` | Smoke test — all datasets sliced to ~16 rows each, ~12 train + ~4 val steps. Verifies model load + tokenizer + multilingual data path + wandb + audio logging in ~3–5 min. | — |
 
 ## Regenerating `base.yaml`
 

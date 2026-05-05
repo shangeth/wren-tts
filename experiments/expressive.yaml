@@ -100,7 +100,7 @@ multispeaker:    true
 eos_loss_weight: 100.0
 
 # --- Sequence sizing ---
-# +20 over v2-multi (200) to absorb the new <style> tag tokens cleanly.
+# +20 over the multi recipe (200) to absorb the new <style> tag tokens cleanly.
 max_text_tokens:  220
 max_audio_frames: 300
 max_ref_frames:   150
@@ -117,7 +117,7 @@ prefetch_factor: 2
 # --- Resume from pretrained checkpoint ---
 # Path to the local .pt checkpoint of shangeth/Wren-TTS-0.5B-multi.
 # (The trainer's resume_from expects a state-dict checkpoint, not an HF model card.)
-resume_from:     checkpoints/v2-multilingual/best.pt
+resume_from:     checkpoints/multi/best.pt
 reset_optimizer: true        # fresh optimizer state — fine-tune is a new objective
 lr:              1.0e-5      # 10× lower than pretrain; preserves multilingual ability
 weight_decay:    0.01

@@ -1,4 +1,4 @@
-# Wren-TTS v2-multilingual — Qwen2.5-0.5B backbone, English + 7-lang MLS mix.
+# Wren-TTS (Multilingual) — Qwen2.5-0.5B backbone, English + 7-lang MLS mix.
 #
 # Why Qwen2.5-0.5B? SmolLM2 is English-pretrained and tokenizes non-Latin /
 # diacritic-heavy text poorly. Qwen2.5 is multilingual and has efficient tokens
@@ -74,7 +74,8 @@ codebook_size:   2048
 mimi_model_name: kyutai/mimi
 
 # --- Architecture / loss ---
-# Uniform per-codebook weights — keeps cb0 from overfitting (v1's pattern).
+# Uniform per-codebook weights — keeps cb0 from overfitting (the pattern earlier
+# recipes had when cb0 was weighted at 2×).
 cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 multispeaker:    true
 eos_loss_weight: 50.0
@@ -99,7 +100,7 @@ reset_optimizer: false
 lr:              1.0e-4
 weight_decay:    0.01
 betas:           [0.9, 0.95]
-lr_warmup_steps: 2000        # longer than v2 (500) — bigger embed table + larger run
+lr_warmup_steps: 2000        # longer than the en recipe (500) — bigger embed table + larger run
 lr_decay_steps:  5000        # floor; trainer auto-extends to ~epochs × steps_per_epoch
 epochs:          30          # upper bound; val_patience early-stops if val/loss plateaus.
 val_patience:    2           # stop after 5 consecutive epochs without val/loss improvement
@@ -109,9 +110,9 @@ use_amp:   true
 
 # --- Logging ---
 log_audio_every: 1000
-checkpoint_dir:  checkpoints/v2-multilingual
-log_dir:         runs/v2-multilingual
+checkpoint_dir:  checkpoints/multi
+log_dir:         runs/multi
 logger:          wandb
 wandb_project:   wren
-wandb_run_name:  wren-tts-qwen-v2-multilingual
+wandb_run_name:  wren-tts-multi
 keep_last_n:     3

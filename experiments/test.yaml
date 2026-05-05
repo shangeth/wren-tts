@@ -1,4 +1,4 @@
-# Smoke test for v2-multilingual setup — verifies the pipeline before committing
+# Smoke test for the multilingual pipeline — verifies everything before committing
 # to the real ~1.7-day run.
 #
 # What this exercises:
@@ -58,12 +58,12 @@ k_codebooks:     8
 codebook_size:   2048
 mimi_model_name: kyutai/mimi
 
-# --- Architecture / loss (matches v2-multilingual) ---
+# --- Architecture / loss (matches the multi recipe) ---
 cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 multispeaker:    true
 eos_loss_weight: 50.0
 
-# --- Sequence sizing (matches v2-multilingual) ---
+# --- Sequence sizing (matches the multi recipe) ---
 max_text_tokens:  200
 max_audio_frames: 300
 max_ref_frames:   150
@@ -96,5 +96,5 @@ checkpoint_dir:  checkpoints/test
 log_dir:         runs/test
 logger:          wandb
 wandb_project:   wren
-wandb_run_name:  smoke-test-multilingual
+wandb_run_name:  wren-tts-test
 keep_last_n:     1
