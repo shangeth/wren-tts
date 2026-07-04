@@ -248,9 +248,15 @@ class HFMimiDataset(Dataset):
                     ref_idx = random.choice([i for i in range(len(self.indices)) if i != idx])
 
             if ref_idx is not None:
-                rc    = self._codes_tensor(self.indices[ref_idx])
-                T_ref = min(rc.shape[1], self.cfg.max_ref_frames)
-                ref_codes = rc[: self.k, :T_ref]
+                rc     = self._codes_tensor(self.indices[ref_idx])
+                T_full = rc.shape[1]
+                T_ref  = min(T_full, self.cfg.max_ref_frames)
+                # Random contiguous window (training-time augmentation): exposes the model to
+                # varied reference segments rather than always the utterance onset, and better
+                # matches inference where the user supplies an arbitrary clip. Inference/eval
+                # keep the deterministic leading crop. No-op when the clip is <= max_ref_frames.
+                start = random.randint(0, T_full - T_ref) if T_full > T_ref else 0
+                ref_codes = rc[: self.k, start:start + T_ref]
 
         return _build_sequence(
             text_ids           = text_ids,

@@ -37,7 +37,7 @@ hf_splits:
   - train[:16]
   - train_clean_100[:16]
   - train[:16]
-  - 1_hours[:32]              # MLS smallest split, default config "all" globs across 7 langs
+  - train[:32]               # MLS default config "all" globs across 7 langs
 
 hf_weights:        [1.0, 1.0, 1.0, 1.0, 1.0]
 hf_val_from_train: [0.0, 0.0, 0.0, 0.0, 0.0]   # use explicit val instead
@@ -47,7 +47,7 @@ hf_val_datasets:
   - shangeth/mls-mimi-codes
 hf_val_splits:
   - dev_clean[:16]
-  - dev[:16]
+  - validation[:16]
 
 # --- LLM backbone ---
 llm_name: Qwen/Qwen2.5-0.5B

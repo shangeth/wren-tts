@@ -17,12 +17,12 @@
 #   At ~7 steps/sec on A100: ~8 hr/epoch → 5 epochs ≈ 1.7 days.
 #
 # MLS uses its `all` virtual config (default), which globs across the 7 language
-# directories. `dev` likewise globs across all 7 langs (~14k rows of multilingual
-# val).
+# directories. `validation` likewise globs across all 7 langs (~14k rows of
+# multilingual val). NOTE: MLS names its dev split `validation` (not `dev`).
 #
 # Val:
-#   - LibriTTS-R dev_clean  (English, ~5.7k rows after filter)
-#   - MLS dev (7 langs)     (~14k rows, multilingual)
+#   - LibriTTS-R dev_clean    (English, ~5.7k rows after filter)
+#   - MLS validation (7 langs) (~14k rows, multilingual)
 #   - 5% held-out from VCTK / Jenny / LJSpeech (deterministic seed=2027)
 #
 # Speaker-id collisions: MLS speaker_ids are integers reused across languages
@@ -62,7 +62,7 @@ hf_val_datasets:
   - shangeth/mls-mimi-codes
 hf_val_splits:
   - dev_clean
-  - dev
+  - validation
 
 # --- LLM backbone ---
 llm_name: Qwen/Qwen2.5-0.5B
@@ -115,5 +115,5 @@ checkpoint_dir:  checkpoints/multi
 log_dir:         runs/multi
 logger:          wandb
 wandb_project:   wren
-wandb_run_name:  wren-tts-multi
+wandb_run_name:  wren-tts-multi-dt
 keep_last_n:     3
