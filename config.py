@@ -16,8 +16,22 @@ class Config:
 
     # --- Mimi codec ---
     mimi_model_name:       str   = "kyutai/mimi"
-    k_codebooks:           int   = 8          # codebooks to USE during training (HF datasets ship 8). Delay pattern makes k=8 tractable.
+    k_codebooks:           int   = 8          # codebooks to USE during training (HF datasets ship 8). The RQ depth decoder makes k=8 tractable.
     codebook_size:         int   = 2048       # Mimi codebook vocab size (fixed)
+
+    # --- Depth decoder (RQ) ---
+    # Small autoregressive transformer over the codebook axis: the backbone predicts
+    # codebook 0 (semantic), the depth decoder predicts codebooks 1..k-1 conditioned on
+    # the backbone hidden state + previously-generated codebooks of the same frame.
+    depth_num_layers:        int   = 4
+    depth_hidden_size:       int   = 640      # decoder_dim (head_dim = depth_hidden_size / depth_num_heads)
+    depth_num_heads:         int   = 10
+    depth_intermediate_size: int   = 2560
+    # Compute amortization: fraction of frames on which the depth decoder is trained each
+    # step (cb0 always trains on every frame). 1.0 = train depth on all frames (default).
+    # <1.0 = per-frame Bernoulli subsample (CSM uses ~1/16) — cheaper depth training.
+    depth_train_fraction:    float = 1.0
+    tie_audio_embeddings:    bool  = True     # one shared offset table feeds backbone input AND depth input
 
     # --- Data (HuggingFace datasets only) ---
     # Parallel lists — index i defines one dataset source:
@@ -70,9 +84,10 @@ class Config:
     use_amp:               bool  = True
     device:                str   = "cuda" if torch.cuda.is_available() else "cpu"
     compile_model:         bool  = False
-    # Per-codebook loss weights (cb0..cb_{k-1}). Truncated / padded to k via last value.
-    # Normalized as a weighted average, so [1, 0.5, 0.5] and [2, 1, 1] are equivalent.
-    cb_loss_weights:       List[float] = field(default_factory=lambda: [1.0, 0.5, 0.5, 0.25, 0.25, 0.25, 0.25, 0.25])
+    # Two-loss weighting: total = cb0_loss_weight * cb0_CE + depth_loss_weight * depth_CE.
+    # cb0 is the backbone/semantic codebook (holds EOS); depth covers cb1..cb_{k-1}.
+    cb0_loss_weight:       float = 1.0
+    depth_loss_weight:     float = 1.0
 
     # --- Checkpointing ---
     checkpoint_dir:        str   = "checkpoints"

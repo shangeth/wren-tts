@@ -95,7 +95,8 @@ mimi_model_name: kyutai/mimi
 # redirects gradient toward the new style/code learning while keeping EOS
 # supervised enough to handle Expresso's unusual endings (whispered trail-offs,
 # laughing fade-outs).
-cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+cb0_loss_weight:   1.0
+depth_loss_weight: 1.0
 multispeaker:    true
 eos_loss_weight: 100.0
 

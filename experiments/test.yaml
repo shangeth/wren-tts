@@ -58,8 +58,15 @@ k_codebooks:     8
 codebook_size:   2048
 mimi_model_name: kyutai/mimi
 
-# --- Architecture / loss (matches the multi recipe) ---
-cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+# --- Architecture / loss (RQ depth-transformer) ---
+depth_num_layers:        4
+depth_hidden_size:       640
+depth_num_heads:         10
+depth_intermediate_size: 2560
+depth_train_fraction:    1.0
+tie_audio_embeddings:    true
+cb0_loss_weight:         1.0
+depth_loss_weight:       1.0
 multispeaker:    true
 eos_loss_weight: 50.0
 

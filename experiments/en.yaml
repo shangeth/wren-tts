@@ -36,7 +36,8 @@ hf_val_splits:   [dev_clean]
 k_codebooks: 8
 # Uniform per-codebook weights — avoids the cb0-overfit pattern from earlier recipes
 # (which weighted cb0 at 2×).
-cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+cb0_loss_weight:   1.0
+depth_loss_weight: 1.0
 multispeaker:    true
 eos_loss_weight: 50.0
 

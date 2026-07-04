@@ -3,29 +3,64 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
+from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import LlamaModel
 from typing import Dict, Optional, Tuple
 
 from config import Config
 
 
+class DepthDecoder(nn.Module):
+    """
+    Small autoregressive transformer over the CODEBOOK axis (RQ-Transformer depth model).
+
+    For one frame it consumes a length-k sequence in the depth dimension:
+        [ projection(h) , emb(c0) , emb(c1) , ... , emb(c_{k-2}) ]
+    and predicts c1..c_{k-1} at output positions 1..k-1 (position 0 = the backbone hidden
+    state is a context prefix; its output is unused). Causality over the k positions is the
+    plain LlamaModel causal mask, so position j+1 only attends to {h, c0..c_j} → predicts c_{j+1}.
+
+    Built from a LlamaModel fed via inputs_embeds (never input_ids): we get tested RoPE /
+    RMSNorm / SDPA for free. The unused token embedding table is kept tiny (vocab_size=8).
+    """
+
+    def __init__(self, cfg: Config):
+        super().__init__()
+        depth_cfg = LlamaConfig(
+            hidden_size             = cfg.depth_hidden_size,
+            num_hidden_layers       = cfg.depth_num_layers,
+            num_attention_heads     = cfg.depth_num_heads,
+            num_key_value_heads     = cfg.depth_num_heads,   # no GQA — sequence is length k
+            intermediate_size       = cfg.depth_intermediate_size,
+            vocab_size              = 8,                       # unused (inputs_embeds path)
+            max_position_embeddings = cfg.k_codebooks + 2,
+            rms_norm_eps            = 1e-5,
+        )
+        self.model = LlamaModel(depth_cfg)
+
+    def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
+        """inputs_embeds [*, S, D] → last_hidden_state [*, S, D]."""
+        return self.model(inputs_embeds=inputs_embeds, use_cache=False).last_hidden_state
+
+
 class TTSModel(nn.Module):
     """
-    LLM fine-tuned to predict Mimi codebook tokens in MusicGen-style DELAY pattern.
+    LLM backbone + RQ depth-transformer over Mimi codebooks (CSM/Marvis-style).
 
-    At each audio step s the model sees the sum of k per-codebook input embeddings
-    (one per codebook for the codes placed at step s by the delay transform) and
-    predicts k tokens via k parallel heads. Codebook q at real frame f lives at
-    step s = f + q.
+    The backbone (any HF causal LM) predicts codebook 0 (Mimi's semantic codebook) at each
+    frame; a small DepthDecoder predicts codebooks 1..k-1 autoregressively within the frame,
+    conditioned on the backbone hidden state + the previously-generated codebooks. There is
+    NO delay pattern — the backbone runs at sequence length text + T (+1 EOS slot).
 
     Sequence layout (via inputs_embeds):
-      [ text tokens... | <audio_start> | delayed target audio steps ]
-      (with optional [ <reference_start> | delayed ref | <reference_end> ] prefix)
+      [ text tokens... | <audio_start> | target audio frames | EOS slot ]
+      (with optional [ <reference_start> | ref frames | <reference_end> ] prefix)
 
     Shapes:
       input_ids    [B, L]    text-vocab IDs at text positions, 0 at audio positions (unused)
-      audio_codes  [B, L, k] per-codebook input code; AUDIO_PAD at text and invalid delay edges
-      audio_mask   [B, L]    True at audio steps
-      labels       [B, L, k] per-codebook target; -100 at text/ref/invalid; AUDIO_EOS for cb0 at step T
+      audio_codes  [B, L, k] per-codebook input code; PAD (value >= codebook_size) at text/edges
+      audio_mask   [B, L]    True at audio frames (ref or target)
+      labels       [B, L, k] per-codebook target; -100 at text/ref/edges; cb0 = AUDIO_EOS at EOS slot
     """
 
     def __init__(self, cfg: Config, tokenizer):
@@ -34,7 +69,9 @@ class TTSModel(nn.Module):
         self.k   = cfg.k_codebooks
 
         # Load LLM backbone in fp32; mixed precision is applied via autocast in the trainer.
-        self.llm = AutoModelForCausalLM.from_pretrained(cfg.llm_name)
+        # (transformers >=5 loads in the checkpoint's native dtype by default — force fp32 so
+        # the whole model, incl. the depth decoder and audio heads, shares one dtype.)
+        self.llm = AutoModelForCausalLM.from_pretrained(cfg.llm_name, dtype=torch.float32)
 
         # Resize embeddings to include the new special tokens
         new_vocab_size = len(tokenizer)
@@ -53,40 +90,50 @@ class TTSModel(nn.Module):
         self.reference_end_id   = _lookup("<|reference_end|>", "<|audio_end|>")
 
         hidden = self.llm.config.hidden_size
+        cs     = cfg.codebook_size
+        k      = self.k
 
-        # AUDIO_PAD is an INPUT index (embedding lookup for invalid delay positions).
-        # AUDIO_EOS is an OUTPUT class in cb0's head ("stop generating").
-        # They share the numeric value codebook_size (=2048) but live in different spaces
-        # and never collide (EOS is never fed back as input after cb0 predicts it).
-        self.AUDIO_PAD = cfg.codebook_size
-        self.AUDIO_EOS = cfg.codebook_size
+        # AUDIO_PAD is an INPUT embedding index — the single extra row at the end of the
+        # tied table, used for any PAD slot. Codes arrive in audio_codes with a PAD sentinel
+        # value of `codebook_size` (what the collator/dataset write); the model detects
+        # `code >= codebook_size` and remaps to this row.
+        # AUDIO_EOS is an OUTPUT class on cb0's head ("stop generating"); it is never fed
+        # back as an input.
+        self.AUDIO_PAD = k * cs        # embedding-table index for PAD
+        self.AUDIO_EOS = cs            # cb0 output class
 
-        # k input embedding tables, size codebook_size + 1 (extra row = PAD at index codebook_size).
-        self.audio_embeds = nn.ModuleList([
-            nn.Embedding(cfg.codebook_size + 1, hidden)
-            for _ in range(cfg.k_codebooks)
-        ])
+        # One TIED offset embedding table: input index for code c in codebook q = c + q*cs.
+        # Feeds both the backbone input (summed across codebooks) and the depth decoder.
+        self.audio_embed = nn.Embedding(k * cs + 1, hidden)
+        if not cfg.tie_audio_embeddings:
+            self.depth_audio_embed = nn.Embedding(k * cs + 1, hidden)
+        self.register_buffer("cb_offsets", torch.arange(k) * cs, persistent=False)  # [k]
 
-        # k prediction heads. cb0 has codebook_size + 1 outputs (extra = AUDIO_EOS);
-        # cb1..cb_{k-1} have codebook_size outputs (no PAD/EOS in output space — PAD positions
-        # get -100 labels and are skipped in the CE loss).
-        self.audio_heads = nn.ModuleList([
-            nn.Linear(hidden, cfg.codebook_size + (1 if i == 0 else 0), bias=False)
-            for i in range(cfg.k_codebooks)
-        ])
-
-        # Scale the summed input embedding by 1/sqrt(k) so its variance matches
-        # a single embedding table (each table init'd with std=init_std).
+        # Scale the summed input embedding by 1/sqrt(k) so its variance matches a single table.
         self.embed_scale = 1.0 / math.sqrt(self.k)
+
+        # cb0 predictor on the backbone (extra class = AUDIO_EOS).
+        self.codebook0_head = nn.Linear(hidden, cs + 1, bias=False)
+
+        # Depth path: project the backbone hidden into the decoder width, then k-1 per-position
+        # heads (audio_heads[j] predicts codebook j+1).
+        self.projection  = nn.Linear(hidden, cfg.depth_hidden_size, bias=False)
+        self.audio_heads = nn.ModuleList([
+            nn.Linear(cfg.depth_hidden_size, cs, bias=False) for _ in range(k - 1)
+        ])
+        self.depth_decoder = DepthDecoder(cfg)
 
         # Initialize new parameters with the LLM's init std
         init_std = getattr(self.llm.config, "initializer_range", 0.02)
-        for emb in self.audio_embeds:
-            nn.init.normal_(emb.weight, mean=0.0, std=init_std)
+        nn.init.normal_(self.audio_embed.weight, mean=0.0, std=init_std)
+        if not cfg.tie_audio_embeddings:
+            nn.init.normal_(self.depth_audio_embed.weight, mean=0.0, std=init_std)
+        nn.init.normal_(self.codebook0_head.weight, mean=0.0, std=init_std)
+        nn.init.normal_(self.projection.weight, mean=0.0, std=init_std)
         for head in self.audio_heads:
             nn.init.normal_(head.weight, mean=0.0, std=init_std)
 
-        # Optional LoRA wrapping
+        # Optional LoRA wrapping (backbone only; depth decoder is trained fully)
         if cfg.use_lora:
             from peft import LoraConfig, get_peft_model, TaskType
             lora_cfg = LoraConfig(
@@ -100,7 +147,23 @@ class TTSModel(nn.Module):
             self.llm = get_peft_model(self.llm, lora_cfg)
 
     # ------------------------------------------------------------------
-    # Training forward
+    # Embedding-table helpers (tie-aware)
+    # ------------------------------------------------------------------
+
+    def _input_table(self) -> nn.Embedding:
+        return self.audio_embed
+
+    def _depth_table(self) -> nn.Embedding:
+        return self.audio_embed if self.cfg.tie_audio_embeddings else self.depth_audio_embed
+
+    def _code_indices(self, codes: torch.LongTensor) -> torch.LongTensor:
+        """Map raw per-codebook codes [..., k] to tied-table indices, PAD (value>=cs) → AUDIO_PAD."""
+        is_pad = codes >= self.cfg.codebook_size
+        offset = codes + self.cb_offsets
+        return torch.where(is_pad, torch.full_like(codes, self.AUDIO_PAD), offset)
+
+    # ------------------------------------------------------------------
+    # Backbone forward helpers
     # ------------------------------------------------------------------
 
     def _build_inputs_embeds(
@@ -109,22 +172,51 @@ class TTSModel(nn.Module):
         audio_codes: torch.LongTensor,   # [B, L, k]
         audio_mask:  torch.BoolTensor,   # [B, L]
     ) -> torch.Tensor:
-        """Build [B, L, H] inputs_embeds mixing text and summed-audio embeddings."""
-        text_vocab = self.llm.config.vocab_size
-        safe_ids   = input_ids.clamp(0, text_vocab - 1)
-        text_embeds = self.llm.model.embed_tokens(safe_ids)  # [B, L, H]
+        """Build [B, L, H] inputs_embeds mixing text and summed-audio embeddings (no delay)."""
+        text_vocab  = self.llm.config.vocab_size
+        text_embeds = self.llm.model.embed_tokens(input_ids.clamp(0, text_vocab - 1))  # [B, L, H]
 
-        # Sum per-codebook embeddings at every position (even text positions — they hold
-        # PAD at index codebook_size, which is a valid embedding row). We mask in the
-        # text embeddings at non-audio positions via torch.where.
-        audio_sum = self.audio_embeds[0](audio_codes[:, :, 0])
-        for q in range(1, self.k):
-            audio_sum = audio_sum + self.audio_embeds[q](audio_codes[:, :, q])
-        audio_sum = audio_sum * self.embed_scale
+        idx       = self._code_indices(audio_codes)                 # [B, L, k]
+        audio_sum = self._input_table()(idx).sum(dim=2) * self.embed_scale  # [B, L, H]
         audio_sum = audio_sum.to(text_embeds.dtype)
 
-        # Mix by audio_mask
         return torch.where(audio_mask.unsqueeze(-1), audio_sum, text_embeds)
+
+    def backbone_hidden(
+        self,
+        input_ids:      torch.LongTensor,
+        audio_codes:    torch.LongTensor,
+        audio_mask:     torch.BoolTensor,
+        attention_mask: torch.LongTensor,
+    ) -> torch.Tensor:
+        """Run the backbone over the full sequence → last_hidden_state [B, L, H]."""
+        emb = self._build_inputs_embeds(input_ids, audio_codes, audio_mask)
+        return self.llm.model(
+            inputs_embeds=emb, attention_mask=attention_mask, use_cache=False
+        ).last_hidden_state
+
+    def _depth_logits(self, h_sel: torch.Tensor, codes_sel: torch.LongTensor):
+        """
+        Teacher-forced depth pass for a batch of frames.
+
+        Args:
+            h_sel:     [M, H] backbone hidden state per frame (predicts that frame's codes)
+            codes_sel: [M, k] real codes c0..c_{k-1} for those frames
+        Returns:
+            list of k-1 logits tensors, logits[j] = [M, cs] predicting c_{j+1}
+        """
+        M = h_sel.shape[0]
+        tf_idx = codes_sel[:, : self.k - 1] + self.cb_offsets[: self.k - 1]  # [M, k-1] (c0..c_{k-2})
+        tf_emb = self._depth_table()(tf_idx)                                 # [M, k-1, H]
+        prefix = h_sel.unsqueeze(1)                                          # [M, 1, H]
+        depth_in_H = torch.cat([prefix, tf_emb], dim=1)                      # [M, k, H]
+        depth_in   = self.projection(depth_in_H)                            # [M, k, D]
+        dec = self.depth_decoder(depth_in)                                  # [M, k, D]
+        return [self.audio_heads[j](dec[:, j + 1, :].float()) for j in range(self.k - 1)]
+
+    # ------------------------------------------------------------------
+    # Training forward
+    # ------------------------------------------------------------------
 
     def forward(
         self,
@@ -136,75 +228,146 @@ class TTSModel(nn.Module):
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Returns:
-            total_loss: weighted mean CE loss across codebooks
-            loss_dict:  {'loss': ..., 'loss_cb0': ..., 'loss_cb1': ..., ...}
+            total_loss: cb0_loss_weight * cb0_CE + depth_loss_weight * depth_CE
+            loss_dict:  {'loss', 'loss_cb0', 'loss_depth'}
         """
-        inputs_embeds = self._build_inputs_embeds(input_ids, audio_codes, audio_mask)
+        hidden = self.backbone_hidden(input_ids, audio_codes, audio_mask, attention_mask)
 
-        out = self.llm.model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            use_cache=False,
-        )
-        hidden = out.last_hidden_state  # [B, L, H]
+        # Causal shift: hidden at position i predicts labels at position i+1
+        pred_hidden = hidden[:, :-1, :]     # [B, L-1, H]
+        target      = labels[:, 1:, :]      # [B, L-1, k]
 
-        # Causal LM shift: hidden at position i predicts labels at position i+1
-        pred_hidden   = hidden[:, :-1, :]       # [B, L-1, H]
-        target_labels = labels[:, 1:, :]        # [B, L-1, k]
-
-        # Resolve per-codebook weights to length k: truncate, or pad with the last value.
-        raw_w = list(self.cfg.cb_loss_weights) if self.cfg.cb_loss_weights else [1.0]
-        cb_w  = raw_w[: self.k] + [raw_w[-1]] * max(0, self.k - len(raw_w))
-
-        weighted_terms: list = []
-        total_weight: float  = 0.0
         loss_dict: Dict[str, float] = {}
 
-        for cb_idx in range(self.k):
-            target_k = target_labels[:, :, cb_idx]          # [B, L-1]
-            valid    = target_k != -100                      # bool [B, L-1]
-            if not valid.any():
-                continue
-            h_k      = pred_hidden[valid]                    # [N, H]
-            logits_k = self.audio_heads[cb_idx](h_k.float())  # [N, out_dim]
-            t_k      = target_k[valid]                       # [N]
-            if cb_idx == 0 and self.cfg.eos_loss_weight != 1.0:
-                # Upweight AUDIO_EOS to counter the 1:~(T) imbalance in cb0 supervision.
-                eos_w = torch.ones(self.cfg.codebook_size + 1, device=logits_k.device)
-                eos_w[self.AUDIO_EOS] = self.cfg.eos_loss_weight
-                loss_k = F.cross_entropy(logits_k, t_k, weight=eos_w)
+        # ---- cb0 loss (backbone; includes EOS) ----
+        cb0_t  = target[:, :, 0]            # [B, L-1]
+        valid0 = cb0_t != -100
+        if valid0.any():
+            h0      = pred_hidden[valid0]                       # [N0, H]
+            logits0 = self.codebook0_head(h0.float())           # [N0, cs+1]
+            t0      = cb0_t[valid0]                              # [N0]
+            if self.cfg.eos_loss_weight != 1.0:
+                w = torch.ones(self.cfg.codebook_size + 1, device=logits0.device)
+                w[self.AUDIO_EOS] = self.cfg.eos_loss_weight
+                cb0_loss = F.cross_entropy(logits0, t0, weight=w)
             else:
-                loss_k = F.cross_entropy(logits_k, t_k)
-            loss_dict[f"loss_cb{cb_idx}"] = loss_k.item()
-            w = float(cb_w[cb_idx])
-            weighted_terms.append(w * loss_k)
-            total_weight += w
-
-        if not weighted_terms:
-            total_loss = torch.tensor(0.0, device=hidden.device, requires_grad=True)
+                cb0_loss = F.cross_entropy(logits0, t0)
         else:
-            total_loss = torch.stack(weighted_terms).sum() / max(total_weight, 1e-8)
+            cb0_loss = pred_hidden.sum() * 0.0
+        loss_dict["loss_cb0"] = float(cb0_loss.detach())
 
-        loss_dict["loss"] = total_loss.item()
+        # ---- depth loss (cb1..cb_{k-1}); supervised real frames only ----
+        depth_mask = target[:, :, 1] != -100                    # [B, L-1] real frames
+        if self.training and self.cfg.depth_train_fraction < 1.0:
+            keep = torch.rand(depth_mask.shape, device=depth_mask.device) < self.cfg.depth_train_fraction
+            depth_mask = depth_mask & keep
+        if depth_mask.any() and self.k > 1:
+            h_sel     = pred_hidden[depth_mask]                 # [M, H]
+            codes_sel = target[depth_mask]                      # [M, k] (all real)
+            logits_list = self._depth_logits(h_sel, codes_sel)  # list of [M, cs]
+            depth_tgt   = codes_sel[:, 1:]                      # [M, k-1]
+            terms = [F.cross_entropy(logits_list[j], depth_tgt[:, j]) for j in range(self.k - 1)]
+            depth_loss = torch.stack(terms).mean()
+        else:
+            depth_loss = pred_hidden.sum() * 0.0
+        loss_dict["loss_depth"] = float(depth_loss.detach())
+
+        total_loss = self.cfg.cb0_loss_weight * cb0_loss + self.cfg.depth_loss_weight * depth_loss
+        loss_dict["loss"] = float(total_loss.detach())
         return total_loss, loss_dict
 
     # ------------------------------------------------------------------
-    # Generation (delay-aware)
+    # DPO-readiness hooks (log-probs + freezing) — DPO itself not implemented
     # ------------------------------------------------------------------
 
-    def _audio_embed_step(self, codes_step: torch.LongTensor) -> torch.Tensor:
+    def compute_logprobs(
+        self,
+        input_ids:      torch.LongTensor,
+        audio_codes:    torch.LongTensor,
+        audio_mask:     torch.BoolTensor,
+        labels:         torch.LongTensor,
+        attention_mask: torch.LongTensor,
+        include_depth:  bool = False,
+    ) -> Dict[str, torch.Tensor]:
         """
-        Build the input embedding for a single audio step.
+        Single differentiable teacher-forced pass returning per-frame log-probabilities.
 
-        Args:
-            codes_step: [1, k] codes (one per codebook) for this step.
+        cb0 is the "content stream" (analogue of Moshi's text stream that Kyutai's GRPO
+        targets). No no_grad / argmax / loss reduction — suitable for DPO/GRPO objectives.
+
         Returns:
-            [1, 1, H] input embedding, scaled.
+            cb0_logprobs     [B, L-1]  log p(cb0 target); 0 at non-cb0-supervised positions
+            cb0_mask         [B, L-1]  bool, True where cb0 is supervised
+            cb0_logprob_sum  [B]       per-sequence sum of cb0 log-probs
+            (if include_depth)
+            full_logprobs    [B, L-1]  cb0 + sum_j log p(c_{j+1}) at real frames
+            full_logprob_sum [B]
         """
-        acc = self.audio_embeds[0](codes_step[:, 0:1])            # [1, 1, H]
-        for q in range(1, self.k):
-            acc = acc + self.audio_embeds[q](codes_step[:, q:q + 1])
-        return acc * self.embed_scale
+        hidden      = self.backbone_hidden(input_ids, audio_codes, audio_mask, attention_mask)
+        pred_hidden = hidden[:, :-1, :]     # [B, L-1, H]
+        target      = labels[:, 1:, :]      # [B, L-1, k]
+        B, Lm1, _   = target.shape
+
+        logp0    = F.log_softmax(self.codebook0_head(pred_hidden.float()), dim=-1)  # [B,L-1,cs+1]
+        cb0_mask = target[:, :, 0] != -100                                          # [B,L-1]
+        tgt0     = target[:, :, 0].clamp_min(0)
+        cb0_logprobs = logp0.gather(-1, tgt0.unsqueeze(-1)).squeeze(-1)             # [B,L-1]
+        cb0_logprobs = cb0_logprobs.masked_fill(~cb0_mask, 0.0)
+
+        out = {
+            "cb0_logprobs":    cb0_logprobs,
+            "cb0_mask":        cb0_mask,
+            "cb0_logprob_sum": cb0_logprobs.sum(dim=1),
+        }
+
+        if include_depth and self.k > 1:
+            depth_mask = target[:, :, 1] != -100                                    # [B,L-1]
+            full = cb0_logprobs.clone()
+            if depth_mask.any():
+                h_sel     = pred_hidden[depth_mask]                                 # [M,H]
+                codes_sel = target[depth_mask]                                      # [M,k]
+                logits_list = self._depth_logits(h_sel, codes_sel)                  # list [M,cs]
+                depth_tgt   = codes_sel[:, 1:]                                      # [M,k-1]
+                depth_lp = torch.zeros(h_sel.shape[0], device=full.device)          # [M]
+                for j in range(self.k - 1):
+                    lp = F.log_softmax(logits_list[j], dim=-1)
+                    depth_lp = depth_lp + lp.gather(-1, depth_tgt[:, j:j + 1]).squeeze(-1)
+                # scatter [M] back into [B,L-1] at the masked positions
+                full[depth_mask] = full[depth_mask] + depth_lp
+            out["full_logprobs"]    = full
+            out["full_logprob_sum"] = full.sum(dim=1)
+
+        return out
+
+    def freeze_depth_decoder(self):
+        """Freeze the depth path (decoder + projection + audio_heads). Backbone, tied table,
+        and codebook0_head stay trainable — mirrors CSM-style targeted RL on the content stream."""
+        for p in self.depth_decoder.parameters():
+            p.requires_grad_(False)
+        for p in self.projection.parameters():
+            p.requires_grad_(False)
+        for head in self.audio_heads:
+            for p in head.parameters():
+                p.requires_grad_(False)
+
+    def unfreeze_depth_decoder(self):
+        for p in self.depth_decoder.parameters():
+            p.requires_grad_(True)
+        for p in self.projection.parameters():
+            p.requires_grad_(True)
+        for head in self.audio_heads:
+            for p in head.parameters():
+                p.requires_grad_(True)
+
+    # ------------------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------------------
+
+    def _audio_embed_frame(self, frame: torch.LongTensor) -> torch.Tensor:
+        """Backbone input embedding for one full frame [k] → [1, 1, H] (summed, scaled)."""
+        idx = self._code_indices(frame)                      # [k]
+        emb = self._input_table()(idx).sum(dim=0)            # [H]
+        return (emb * self.embed_scale).view(1, 1, -1)
 
     @torch.no_grad()
     def generate(
@@ -221,10 +384,10 @@ class TTSModel(nn.Module):
         reference_end_id:    Optional[int] = None,
     ) -> torch.LongTensor:
         """
-        Autoregressively generate Mimi codes for the given text using the delay pattern.
+        Autoregressively generate Mimi codes for `text`.
 
         Returns:
-            codes: LongTensor [k, n_frames]
+            codes: LongTensor [k, n_frames] (may be [k, 0] on empty generation)
         """
         device = next(self.parameters()).device
         self.eval()
@@ -235,23 +398,13 @@ class TTSModel(nn.Module):
 
         prompt_embeds_list = []
 
-        # --- Optional reference block: <reference_start> ref_delayed <reference_end> ---
+        # --- Optional reference block: <reference_start> ref frames <reference_end> ---
         if ref_codes is not None and reference_start_id is not None and reference_end_id is not None:
             ref_codes = ref_codes.to(device)
-            T_ref     = ref_codes.shape[1]
-
             start_t = torch.tensor([[reference_start_id]], dtype=torch.long, device=device)
-            prompt_embeds_list.append(embed_tokens(start_t.clamp(0, text_vocab - 1)))  # [1, 1, H]
-
-            # Apply delay to ref: [k, T_ref] -> [k, T_ref + k - 1]
-            from dataset import apply_delay  # avoid import cycle at module load
-            ref_delayed = apply_delay(ref_codes.cpu(), self.k, self.AUDIO_PAD).to(device)  # [k, L_ref]
-            L_ref = ref_delayed.shape[1]
-            # Embed each step (summed across codebooks, scaled)
-            for s in range(L_ref):
-                codes_step = ref_delayed[:, s:s + 1].T.contiguous()  # [1, k]
-                prompt_embeds_list.append(self._audio_embed_step(codes_step))
-
+            prompt_embeds_list.append(embed_tokens(start_t.clamp(0, text_vocab - 1)))
+            for t in range(ref_codes.shape[1]):
+                prompt_embeds_list.append(self._audio_embed_frame(ref_codes[:, t]))
             end_t = torch.tensor([[reference_end_id]], dtype=torch.long, device=device)
             prompt_embeds_list.append(embed_tokens(end_t.clamp(0, text_vocab - 1)))
 
@@ -259,79 +412,54 @@ class TTSModel(nn.Module):
         text_ids  = tokenizer.encode(text, add_special_tokens=False)
         full_ids  = text_ids + [self.audio_start_id]
         id_tensor = torch.tensor(full_ids, dtype=torch.long, device=device).unsqueeze(0)
-        prompt_embeds_list.append(embed_tokens(id_tensor.clamp(0, text_vocab - 1)))  # [1, L_text, H]
+        prompt_embeds_list.append(embed_tokens(id_tensor.clamp(0, text_vocab - 1)))
 
-        # Prefill the LLM
+        # Prefill the backbone
         prompt_embeds = torch.cat(prompt_embeds_list, dim=1).to(llm_dtype)
         out     = self.llm.model(inputs_embeds=prompt_embeds, use_cache=True)
         hidden  = out.last_hidden_state
         past_kv = out.past_key_values
 
-        # --- Delay-pattern autoregressive loop ---
-        # outputs[q] accumulates emitted codes for codebook q (one per step, including PAD).
-        # After generation, un-delay to recover the [k, T] frame matrix.
-        outputs: list = [[] for _ in range(self.k)]
-        eos_step: Optional[int] = None
-        max_steps = max_audio_frames + self.k - 1
+        frames: list = []
+        for f in range(max_audio_frames):
+            h = hidden[:, -1:, :]  # [1, 1, H] predicts frame f
 
-        for step in range(max_steps):
-            # Compute all k heads from the last hidden state (parallel prediction).
-            h = hidden[:, -1:, :]  # [1, 1, H]
-            logits_per_cb = [self.audio_heads[q](h.float()).squeeze(1) for q in range(self.k)]  # each [1, out_q]
-
-            # Suppress EOS until min_audio_frames have been emitted by cb0
-            if step < min_audio_frames:
-                logits_per_cb[0][:, self.AUDIO_EOS] = float("-inf")
-
-            # Determine the next code per codebook
-            next_codes = torch.empty(self.k, dtype=torch.long, device=device)
-            for q in range(self.k):
-                # Leading edge: cb_q's first real frame is at step q
-                if step < q:
-                    next_codes[q] = self.AUDIO_PAD
-                    continue
-                # If cb0 has already emitted EOS, stop supervising cb0
-                if q == 0 and eos_step is not None:
-                    next_codes[q] = self.AUDIO_PAD
-                    continue
-                # Trailing edge: cb_q's frame index (step - q) is past EOS?
-                if q > 0 and eos_step is not None and (step - q) >= eos_step:
-                    next_codes[q] = self.AUDIO_PAD
-                    continue
-                # Sample
-                sampled = _sample(logits_per_cb[q], temperature, top_k, top_p)  # scalar LongTensor
-                if q == 0 and sampled.item() == self.AUDIO_EOS:
-                    eos_step = step
-                    next_codes[q] = self.AUDIO_PAD
-                else:
-                    next_codes[q] = sampled
-
-            for q in range(self.k):
-                outputs[q].append(next_codes[q].item())
-
-            # Stop once we've flushed all tail codebooks
-            if eos_step is not None and step >= eos_step + self.k - 1:
+            # --- cb0 from the backbone ---
+            logits0 = self.codebook0_head(h.float()).squeeze(1)  # [1, cs+1]
+            if f < min_audio_frames:
+                logits0[:, self.AUDIO_EOS] = float("-inf")
+            c0 = _sample(logits0, temperature, top_k, top_p)
+            if c0.item() == self.AUDIO_EOS:
                 break
 
-            # Build next input embedding and advance
-            codes_step = next_codes.unsqueeze(0)  # [1, k]
-            next_embed = self._audio_embed_step(codes_step).to(hidden.dtype)
-            out     = self.llm.model(inputs_embeds=next_embed, past_key_values=past_kv, use_cache=True)
+            # --- cb1..cb_{k-1} from the depth decoder (re-run over the growing depth seq) ---
+            frame = [int(c0.item())]
+            proj_h = self.projection(h.to(llm_dtype))                    # [1, 1, D]
+            depth_embs = [proj_h]
+            for j in range(self.k - 1):
+                c_j     = frame[j]
+                tok_idx = torch.tensor([c_j + int(self.cb_offsets[j].item())],
+                                       dtype=torch.long, device=device)
+                tok_emb = self._depth_table()(tok_idx).view(1, 1, -1)     # [1, 1, H]
+                depth_embs.append(self.projection(tok_emb.to(llm_dtype)))
+                seq = torch.cat(depth_embs, dim=1)                        # [1, j+2, D]
+                dec = self.depth_decoder(seq)[:, -1, :]                   # [1, D]
+                logits_j = self.audio_heads[j](dec.float())              # [1, cs]
+                c_next   = _sample(logits_j, temperature, top_k, top_p)
+                frame.append(int(c_next.item()))
+
+            frame_t = torch.tensor(frame, dtype=torch.long, device=device)  # [k]
+            frames.append(frame_t)
+
+            # --- advance the backbone with this frame's summed embedding ---
+            nxt = self._audio_embed_frame(frame_t).to(llm_dtype)
+            out     = self.llm.model(inputs_embeds=nxt, past_key_values=past_kv, use_cache=True)
             hidden  = out.last_hidden_state
             past_kv = out.past_key_values
 
-        # --- Un-delay ---
-        # Number of real frames T is eos_step if set, else max_audio_frames.
-        T = eos_step if eos_step is not None else max_audio_frames
-        # Need at least step >= f + q for frame f's cb_q. Clip T so all needed entries exist.
-        max_available = min(len(outputs[q]) - q for q in range(self.k))
-        T = min(T, max_available)
-        if T <= 0:
+        if not frames:
             return torch.zeros(self.k, 0, dtype=torch.long)
-        codes = torch.empty(self.k, T, dtype=torch.long)
-        for q in range(self.k):
-            codes[q] = torch.tensor(outputs[q][q:q + T], dtype=torch.long)
-        return codes
+        return torch.stack(frames, dim=1).to("cpu", torch.long)  # [k, n_frames]
 
 
 def _sample(

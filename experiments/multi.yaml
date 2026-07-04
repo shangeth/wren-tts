@@ -76,7 +76,8 @@ mimi_model_name: kyutai/mimi
 # --- Architecture / loss ---
 # Uniform per-codebook weights — keeps cb0 from overfitting (the pattern earlier
 # recipes had when cb0 was weighted at 2×).
-cb_loss_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+cb0_loss_weight:   1.0
+depth_loss_weight: 1.0
 multispeaker:    true
 eos_loss_weight: 50.0
 

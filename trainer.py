@@ -307,19 +307,16 @@ class Trainer:
             )
 
         # EOS accuracy: at shifted cb0 positions where label == AUDIO_EOS, how often do we predict EOS?
-        AUDIO_EOS = self.model.AUDIO_EOS
+        model = getattr(self.model, "_orig_mod", self.model)   # unwrap torch.compile
+        AUDIO_EOS = model.AUDIO_EOS
         target_cb0 = labels[:, 1:, 0]                          # [B, L-1]
         eos_mask   = target_cb0 == AUDIO_EOS                    # [B, L-1]
         if eos_mask.any():
             with torch.no_grad():
-                hidden = self.model.llm.model(
-                    inputs_embeds=self.model._build_inputs_embeds(input_ids, audio_codes, audio_mask),
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                ).last_hidden_state
+                hidden = model.backbone_hidden(input_ids, audio_codes, audio_mask, attention_mask)
                 pred_hidden = hidden[:, :-1, :]
                 h_cb0  = pred_hidden[eos_mask]                  # [N, H]
-                logits = self.model.audio_heads[0](h_cb0.float())
+                logits = model.codebook0_head(h_cb0.float())
                 preds  = logits.argmax(-1)
                 correct = (preds == AUDIO_EOS).sum().item()
             loss_dict["eos_correct"] = correct

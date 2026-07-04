@@ -1,24 +1,25 @@
 """
-Training data for Wren-TTS — delay-pattern layout.
+Training data for Wren-TTS — RQ (backbone + depth-transformer) layout.
 
 Reads Mimi-encoded codes + transcripts from HuggingFace dataset repos, concatenates
 the requested splits, and deterministically partitions off the tail as a val split.
 
 Sequence layout (single-speaker):
-  [ text... | <audio_start> | tgt_delayed ]
+  [ text... | <audio_start> | tgt_frames | EOS_slot ]
 
 Sequence layout (multispeaker):
-  [ <reference_start> | ref_delayed | <reference_end> | text... | <audio_start> | tgt_delayed ]
+  [ <reference_start> | ref_frames | <reference_end> | text... | <audio_start> | tgt_frames | EOS_slot ]
 
-Audio blocks are laid out in MusicGen-style delay pattern: at step s, codebook q holds
-frame s-q (or PAD at the leading/trailing edges). Total audio steps per block = T + k - 1.
-cb0's AUDIO_EOS label is placed at step T of the target block (one past the last real frame).
+There is NO delay pattern: each audio position holds all k codebooks of one frame directly,
+so an audio block of T frames occupies T positions (the target block adds ONE extra EOS slot
+so the last real frame's hidden can predict EOS without losing supervision). cb0's AUDIO_EOS
+label lives at that extra slot.
 
 Per-sample output tensors:
   input_ids     [L]    int64  — text/special-token IDs; 0 at audio positions (unused by embed)
-  audio_codes   [L,k]  int64  — per-codebook input; AUDIO_PAD at non-audio and invalid delay edges
-  audio_mask    [L]    bool   — True at audio steps (ref or target)
-  labels        [L,k]  int64  — per-codebook target; -100 at text/ref/invalid; AUDIO_EOS for cb0 at step T
+  audio_codes   [L,k]  int64  — per-codebook input; AUDIO_PAD at non-audio positions and EOS slot
+  audio_mask    [L]    bool   — True at audio positions (ref or target)
+  labels        [L,k]  int64  — per-codebook target; -100 at text/ref/EOS-slot(cb1..); cb0=AUDIO_EOS at EOS slot
   attention_mask[L]    int64  — 1 everywhere, 0 at batch padding
 """
 
@@ -36,34 +37,6 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-def apply_delay(codes: torch.LongTensor, k: int, pad: int) -> torch.LongTensor:
-    """
-    Apply MusicGen-style delay to a [k, T] code matrix.
-
-    Returns [k, T + k - 1] where delayed[q, q:q+T] = codes[q, :] and other positions are `pad`.
-    At step s, codebook q holds frame s-q if 0 <= s-q < T, else pad.
-    """
-    assert codes.dim() == 2 and codes.shape[0] == k, f"expected [k={k}, T], got {tuple(codes.shape)}"
-    T = codes.shape[1]
-    L = T + k - 1
-    delayed = torch.full((k, L), pad, dtype=torch.long)
-    for q in range(k):
-        delayed[q, q:q + T] = codes[q]
-    return delayed
-
-
-def undelay(delayed: torch.LongTensor, k: int, T: int) -> torch.LongTensor:
-    """
-    Inverse of apply_delay. Given a [k, T + k - 1] delayed matrix (or longer), recover [k, T].
-    """
-    assert delayed.dim() == 2 and delayed.shape[0] == k
-    assert delayed.shape[1] >= T + k - 1, f"need at least {T + k - 1} steps, got {delayed.shape[1]}"
-    out = torch.empty((k, T), dtype=delayed.dtype)
-    for q in range(k):
-        out[q] = delayed[q, q:q + T]
-    return out
-
-
 def _build_sequence(
     text_ids:          List[int],
     tgt_codes:         torch.LongTensor,   # [k, T_tgt]
@@ -75,15 +48,15 @@ def _build_sequence(
     reference_end_id:   Optional[int] = None,
 ) -> dict:
     """
-    Build one training sequence in delay-pattern layout.
+    Build one training sequence in RQ (no-delay) layout.
 
     Labels:
       - Text + special tokens: -100
-      - Reference audio steps: -100 (context-only)
-      - Target audio steps: actual codes at valid positions, -100 at leading/trailing PAD edges
-      - cb0 at step T (first post-target step within the target delay window) = AUDIO_EOS
+      - Reference audio frames: -100 (context-only)
+      - Target audio frames: actual codes (all k codebooks) at each frame
+      - Extra EOS slot after the target: cb0 = AUDIO_EOS, cb1..cb_{k-1} = -100
     """
-    AUDIO_PAD = codebook_size       # = 2048 (input-side; also the PAD-label in labels tensor)
+    AUDIO_PAD = codebook_size       # = 2048 (input-side PAD sentinel value in audio_codes)
     AUDIO_EOS = codebook_size       # = 2048 (cb0 output-class meaning "stop")
 
     def _text_part(ids_list: List[int]):
@@ -96,38 +69,37 @@ def _build_sequence(
             labels         = torch.full((n, k), -100, dtype=torch.long),
         )
 
-    def _audio_part(codes: torch.LongTensor, supervise: bool, eos_at_T: bool):
+    def _audio_part(codes: torch.LongTensor, supervise: bool, add_eos: bool):
         """
-        Audio-mode delayed segment.
+        Audio-mode segment — raw per-frame codes, no delay.
 
         Args:
             codes:     [k, T] real codes
-            supervise: True for target block (labels = codes at valid positions),
-                       False for reference block (all labels = -100)
-            eos_at_T:  if True, cb0's label at step T (first post-target step within
-                       the delay window) is AUDIO_EOS. Only True for the target block.
+            supervise: True for target block (labels = codes), False for reference (labels = -100)
+            add_eos:   if True, append one extra slot whose cb0 label is AUDIO_EOS (target only).
+                       Its input codes are PAD and cb1..cb_{k-1} labels are -100.
         """
-        T = codes.shape[1]
-        L = T + k - 1
-        # Input-side codes with PAD at edges
-        delayed = apply_delay(codes, k, AUDIO_PAD)  # [k, L]
+        raw = codes.T.contiguous()                       # [T, k]
+        T   = raw.shape[0]
 
-        # Labels: default -100
-        lab = torch.full((k, L), -100, dtype=torch.long)
+        audio_codes = raw.clone()                        # [T, k]  input-side = real codes
+        lab = torch.full((T, k), -100, dtype=torch.long)
         if supervise:
-            for q in range(k):
-                lab[q, q:q + T] = codes[q]
-            if eos_at_T and k >= 2:
-                # cb0 emits AUDIO_EOS at step T (one past last real cb0 frame).
-                # Column T exists in the delay window iff k >= 2 (since L = T + k - 1 > T).
-                # cb0's input at this step is PAD (frame T has no real data); its label is EOS.
-                lab[0, T] = AUDIO_EOS
+            lab = raw.clone()                            # [T, k]  all codebooks supervised
 
+        if add_eos:
+            pad_row = torch.full((1, k), AUDIO_PAD, dtype=torch.long)
+            eos_row = torch.full((1, k), -100, dtype=torch.long)
+            eos_row[0, 0] = AUDIO_EOS
+            audio_codes = torch.cat([audio_codes, pad_row], dim=0)   # [T+1, k]
+            lab         = torch.cat([lab, eos_row], dim=0)           # [T+1, k]
+
+        L = audio_codes.shape[0]
         return dict(
-            input_ids   = torch.zeros(L, dtype=torch.long),  # unused at audio steps
-            audio_codes = delayed.T.contiguous(),            # [L, k]
+            input_ids   = torch.zeros(L, dtype=torch.long),  # unused at audio positions
+            audio_codes = audio_codes,                       # [L, k]
             audio_mask  = torch.ones(L, dtype=torch.bool),
-            labels      = lab.T.contiguous(),                # [L, k]
+            labels      = lab,                               # [L, k]
         )
 
     parts: List[dict] = []
@@ -135,7 +107,7 @@ def _build_sequence(
     # --- Optional reference block ---
     if ref_codes is not None and reference_start_id is not None and reference_end_id is not None:
         parts.append(_text_part([reference_start_id]))
-        parts.append(_audio_part(ref_codes, supervise=False, eos_at_T=False))
+        parts.append(_audio_part(ref_codes, supervise=False, add_eos=False))
         parts.append(_text_part([reference_end_id]))
 
     # --- Text ---
@@ -144,8 +116,8 @@ def _build_sequence(
     # --- <audio_start> (text→target marker) ---
     parts.append(_text_part([audio_start_id]))
 
-    # --- Target audio block (delay, supervised, EOS at step T) ---
-    parts.append(_audio_part(tgt_codes, supervise=True, eos_at_T=True))
+    # --- Target audio block (raw frames, supervised, EOS slot appended) ---
+    parts.append(_audio_part(tgt_codes, supervise=True, add_eos=True))
 
     input_ids   = torch.cat([p["input_ids"]   for p in parts], dim=0)
     audio_codes = torch.cat([p["audio_codes"] for p in parts], dim=0)
